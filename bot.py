@@ -4,7 +4,7 @@ bot.py — smuHBLogs Telegram Bot
 Handball team logistics tracker for SMU.
 
 Commands
-────────
+─────── 
 Public (anyone can DM the bot):
   /start               — welcome + command list
   /inventory           — see all holdings
@@ -264,8 +264,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines += [
                 "No upcoming training set.\n",
                 "To get started:",
-                "• Forward an attendance message here — the bot will set it up automatically",
-                "• Or manually: `/training DD/MM/YYYY venue time`\n",
+                "• `/training DD/MM/YYYY venue time` — create a session",
+                "• `/attendance` — pull attendance from Google Sheets\n",
                 "📦 `/inventory` — check current equipment",
             ]
             keyboard = [["/inventory", "/whohas"], ["/training", "/help"]]
@@ -296,7 +296,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not attendance:
                 lines += [
                     "*Next step:* Set attendance",
-                    "Forward the attendance message here, or reply to it with `/attendance`",
+                    "Run `/attendance` to pick a session from Google Sheets",
                 ]
                 keyboard = [["/attendance", "/inventory"], ["/required", "/help"]]
             elif not required:
@@ -328,37 +328,39 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     role  = db.get_role(update.effective_user.id) or "viewer"
     is_ic = role in ("ic", "master")
 
-    lines = ["📖 *All commands*\n"]
+    lines = ["📖 *Commands*\n"]
     lines += [
         "*Anyone:*",
-        "`/inventory` — all holdings",
-        "`/inventory [item]` — who has something",
-        "`/whohas [name]` — what someone holds",
+        "`/inventory` — view all equipment holdings",
+        "`/inventory [item]` — see who has a specific item",
+        "`/whohas [name]` — see what someone is holding",
     ]
 
     if is_ic:
         lines += [
             "",
             "*Training:*",
-            "`/training [DD/MM/YYYY] [venue] [time]` — create training",
-            "`/attendance` — reply to attendance msg, or forward message directly",
-            "`/required [items, ...]` — set what's needed",
-            "`/delegate` — generate equipment plan",
+            "`/training [DD/MM/YYYY] [venue] [time]` — create a training session",
+            "`/attendance` — pick from upcoming sessions (via Google Sheets)",
+            "`/sheetattendance [DD/MM/YYYY]` — pull attendance from sheet for a date",
+            "`/required [items, ...]` — set equipment needed for training",
+            "`/delegate` — generate equipment delegation plan",
+            "`/reminderchat` — set this chat as the auto-reminder channel",
             "",
             "*Inventory:*",
-            "`/setholding [name] [qty?] [item]`",
-            "`/removeitem [name] [item]`",
-            "`/rename [old name] to [new name]`",
-            "`/transfer [item] from [name] to [name]`",
-            "`/update [name] [qty?] [item], ...` — bulk update",
+            "`/setholding [name] [qty?] [item]` — assign item to someone",
+            "`/removeitem [name] [item]` — remove item from someone",
+            "`/rename [old] to [new]` — rename a holder",
+            "`/transfer [item] from [name] to [name]` — move item between holders",
+            "`/update [name] [qty?] [item], ...` — bulk post-training update",
             "",
             "*Admin:*",
-            "`/clear training|inventory|all`",
-            "`/handover @username`",
-            "`/listic` — who has access",
+            "`/clear training|inventory|all` — wipe data",
+            "`/handover @username` — hand over IC role",
+            "`/listic` — list who has IC/master access",
         ]
         if role == "master":
-            lines.append("`/removeic @username`")
+            lines.append("`/removeic @username` — revoke IC access")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
