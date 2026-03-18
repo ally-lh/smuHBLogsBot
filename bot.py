@@ -7,6 +7,8 @@ Commands
 ─────── 
 Public (anyone can DM the bot):
   /start               — welcome + command list
+  /attendance                           ← pick session from sheet; view attendance
+  /attendancepos                        ← attendance grouped by position (reads sheet71)
   /inventory           — see all holdings
   /inventory [item]    — who has a specific item
   /whohas [name]       — what someone is holding
@@ -18,9 +20,7 @@ IC-only:
   /removeitem [name] [item]
   /transfer [item] from [name] to [name]
   /update [name] [qty?] [item], ...     ← bulk post-training update
-  /attendance                           ← pick session from sheet; auto-creates training record
   /training [DD/MM/YYYY] [venue] [time] ← optional: manually create training
-  /attendancepos                        ← attendance grouped by position (reads sheet71)
   /required [items, ...]
   /delegate                             ← generate delegation plan + copy-paste message
   /clear training|inventory|all
@@ -347,6 +347,8 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     lines = ["📖 <b>Commands</b>\n"]
     lines += [
         "<b>Anyone:</b>",
+        "/attendance — pick from upcoming sessions (view attendance)",
+        "/attendancepos — same as /attendance but grouped by position",
         "/inventory — view all equipment holdings",
         "/inventory [item] — see who has a specific item",
         "/whohas [name] — see what someone is holding",
@@ -358,9 +360,7 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         lines += [
             "",
             "<b>Training:</b>",
-            "/attendance — pick from upcoming sessions (auto-creates record)",
             "/training [DD/MM/YYYY] [venue] [time] — manually create a training session",
-            "/attendancepos — same as /attendance but grouped by position",
             "/sheetattendance [DD/MM/YYYY] — pull attendance for a specific date",
             "/required [items, ...] — set equipment needed for training",
             "/delegate — generate equipment delegation plan",
@@ -865,7 +865,6 @@ def _build_attendance_msgs(sheet_data: dict, training) -> tuple[str, Optional[st
     return att_msg, "\n".join(plan_lines)
 
 
-@ic_only
 async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     training = db.get_active_training()
 
@@ -945,10 +944,6 @@ async def callback_attendance_pick(update: Update, context: ContextTypes.DEFAULT
     """Handle training date selection from /attendance inline keyboard."""
     query = update.callback_query
     await query.answer()
-
-    if not db.is_ic_or_master(query.from_user.id):
-        await query.edit_message_text("🔒 IC or master access required.")
-        return
 
     date_str = query.data.replace("att_pick_", "")  # DDMMYYYY
     try:
@@ -1069,7 +1064,6 @@ def _build_attendancepos_msg(sheet_data: dict, positions: dict) -> str:
     return "\n".join(lines)
 
 
-@ic_only
 async def cmd_attendancepos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show attendance grouped by position, fetched from Google Sheets."""
     if not _sheets_enabled:
@@ -1103,10 +1097,6 @@ async def callback_attpos_pick(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handle training date selection from /attendancepos inline keyboard."""
     query = update.callback_query
     await query.answer()
-
-    if not db.is_ic_or_master(query.from_user.id):
-        await query.edit_message_text("🔒 IC or master access required.")
-        return
 
     date_str = query.data.replace("attpos_pick_", "")  # DDMMYYYY
     try:
