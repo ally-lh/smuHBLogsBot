@@ -476,25 +476,50 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @ic_only
-async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_update(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     """
-    Bulk post-training inventory update.
-    /update ella 4 balls, ruhan 2 balls, rena bibs, eunice tape bag
-    Each segment overwrites that person's holding for that item.
+    Bulk post-training inventory update. Accepts any format:
+      /update ella 4 balls, rena bibs          (person-first, inline)
+      /update                                  (followed by multiline text — routed to AI)
+      /update balls x11 - michelle, saan       (item-first — routed to AI)
     """
-    if not context.args:
+    # Extract everything after the /update command word
+    full_text = (update.message.text or "").strip()
+    body = re.sub(r'^/update\S*\s*', '', full_text, count=1, flags=re.IGNORECASE).strip()
+
+    if not body:
         await update.message.reply_text(
-            "Usage: `/update [name] [qty?] [item], [name] [qty?] [item], ...`\n\n"
-            "Example:\n"
-            "`/update ella 4 balls, ruhan 2 balls, ally 2 balls, rena bibs, eunice tape bag`",
+            "Send holdings in any format after `/update`:\n\n"
+            "*Person-first:* `ella 4 balls, rena bibs`\n"
+            "*Item-first:* `balls x11 - michelle, saan`\n"
+            "*Multiline* works too — just put each item on its own line.",
             parse_mode="Markdown",
         )
         return
 
-    raw      = " ".join(context.args)
-    segments = [s.strip() for s in raw.split(",") if s.strip()]
-    results, errors = [], []
+    # Try Groq first (handles both formats + multiline)
+    if groq_client and _check_groq_rate_limit(update.effective_user.id):
+        try:
+            entries = _call_groq(body)
+            if entries is not None:
+                if not entries:
+                    await update.message.reply_text("❌ Couldn't find any holdings in that message.")
+                    return
+                by_holder = _apply_holdings(entries)
+                lines = ["✅ *Inventory updated:*\n"]
+                for name, items in sorted(by_holder.items()):
+                    lines.append(f"*{name}*")
+                    for item in items:
+                        lines.append(f"  • {item}")
+                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+                return
+        except Exception as e:
+            logger.error("Groq parse error in /update: %s", e)
+            # Fall through to manual parser
 
+    # Manual fallback: person-first comma-separated
+    segments = [s.strip() for s in body.split(",") if s.strip()]
+    results, errors = [], []
     for seg in segments:
         name, qty, item = parse_name_qty_item(seg.split())
         if not name or not item:
@@ -502,6 +527,14 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
         db.set_holding(name, item, qty)
         results.append(f"• {name.title()} — {fmt(item, qty)}")
+
+    if not results and errors:
+        await update.message.reply_text(
+            "❌ Couldn't parse that format.\n"
+            "Try: `ella 4 balls, rena bibs` or `balls x11 - michelle, saan`",
+            parse_mode="Markdown",
+        )
+        return
 
     lines = ["✅ *Inventory updated:*\n"] + results
     if errors:
@@ -918,6 +951,74 @@ async def cmd_removeic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # AI — FREE-TEXT HOLDINGS PARSER
 # ──────────────────────────────────────────────────────────────
 
+_HOLDINGS_PROMPT = """\
+You are a parser for a handball team logistics bot.
+Extract equipment holdings from this message and return who holds what item and how many.
+
+The message may use EITHER format, or a mix:
+
+PERSON-FIRST — person then item(s):
+  "ella - balls x4, bibs"         → ella: balls(4), bibs(1)
+  "ruhan - balls x3"              → ruhan: balls(3)
+
+ITEM-FIRST — item then people (separated by " - " or nothing):
+  "balls x11 - michelle, saan, denise, sera, ruhan"
+      → each person holds balls(1) [total is context, not per-person qty]
+  "balls x10 denisse sera (4) nydia michelle"
+      → denisse(1), sera(4), nydia(1), michelle(1) of balls
+  "tape bag - gianna"             → gianna: tape bag(1)
+  "cones/marker discs - seraphina"→ seraphina: cones(1) AND marker discs(1)
+  "bibs/tennis balls - kai"       → kai: bibs(1) AND tennis balls(1)
+  "resistance bands - gianna"     → gianna: resistance bands(1)
+  "cones nicole ong"              → nicole ong: cones(1)  [two-word name, no separator]
+
+Rules:
+- Lowercase ALL names and items in output
+- "x N" or "xN" = quantity for that item (ignore as a total, don't divide among people)
+- "(N)" immediately after a name = that specific person's quantity
+- "/" between items = separate items, same holder(s)
+- If no quantity given, use 1
+- Split multi-item, multi-person entries into individual objects
+- Total quantities like "x10" on an item-first line are context only; assign per-person qty from "(N)" annotations, else 1
+- If you cannot parse anything, return []
+
+Return ONLY a JSON array, no explanation:
+[{"name": "ella", "item": "balls", "quantity": 4}, {"name": "ella", "item": "bibs", "quantity": 1}]
+
+Message:
+"""
+
+
+def _call_groq(text: str) -> list | None:
+    """
+    Send text to Groq and return parsed holdings list, or None on failure.
+    Returns [] if Groq parsed successfully but found nothing.
+    Raises on hard errors (let caller handle).
+    """
+    response = groq_client.chat.completions.create(
+        model="llama3-8b-8192",
+        messages=[{"role": "user", "content": _HOLDINGS_PROMPT + text}],
+        temperature=0,
+    )
+    raw   = response.choices[0].message.content.strip()
+    match = re.search(r'\[.*\]', raw, re.DOTALL)
+    if not match:
+        return None
+    return json.loads(match.group())
+
+
+def _apply_holdings(entries: list) -> dict[str, list[str]]:
+    """Write entries to DB. Returns {DisplayName: [formatted items]} for reply."""
+    by_holder: dict[str, list[str]] = {}
+    for e in entries:
+        name = str(e["name"]).lower().strip()
+        item = str(e["item"]).lower().strip()
+        qty  = int(e.get("quantity", 1))
+        db.set_holding(name, item, qty)
+        by_holder.setdefault(name.title(), []).append(fmt(item, qty))
+    return by_holder
+
+
 async def handle_text_holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     IC/master can send a free-text message like:
@@ -966,52 +1067,21 @@ async def handle_text_holdings(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("⏳ Slow down — max 5 AI parses per minute.")
         return
 
-    prompt = f"""You are a parser for a handball team logistics bot.
-Extract holdings from this message. Each entry is a person and what equipment they have.
-Return ONLY a JSON array like:
-[{{"name": "ella", "item": "balls", "quantity": 4}}, {{"name": "ella", "item": "bibs", "quantity": 1}}]
-
-Rules:
-- If no quantity is given, use 1
-- Lowercase all names and items
-- Split multi-item entries into separate objects
-- If you cannot parse anything, return []
-
-Message:
-{text}"""
-
     try:
-        response = groq_client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-        raw = response.choices[0].message.content.strip()
-        # Extract JSON array from response
-        match = re.search(r'\[.*\]', raw, re.DOTALL)
-        if not match:
-            await update.message.reply_text("❌ Couldn't parse that. Try: `name - item x qty, item`", parse_mode="Markdown")
-            return
-        entries = json.loads(match.group())
+        entries = _call_groq(text)
     except Exception as e:
         logger.error("Groq parse error: %s", e)
         await update.message.reply_text("❌ AI parsing failed. Try again or use `/update`.", parse_mode="Markdown")
         return
 
+    if entries is None:
+        await update.message.reply_text("❌ Couldn't parse that.", parse_mode="Markdown")
+        return
     if not entries:
         await update.message.reply_text("❌ Couldn't find any holdings in that message.")
         return
 
-    for entry in entries:
-        db.set_holding(entry["name"], entry["item"], entry.get("quantity", 1))
-
-    # Group by holder for display
-    by_holder: dict[str, list[str]] = {}
-    for entry in entries:
-        by_holder.setdefault(entry["name"].title(), []).append(
-            fmt(entry["item"], entry.get("quantity", 1))
-        )
-
+    by_holder = _apply_holdings(entries)
     lines = ["✅ *Holdings updated:*\n"]
     for name, items in sorted(by_holder.items()):
         lines.append(f"*{name}*")
