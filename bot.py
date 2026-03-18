@@ -136,7 +136,7 @@ def parse_attendance_text(text: str) -> list[tuple[str, str, str | None]]:
     Skips metadata lines (Attendance for..., Venue:, Reporting time:, dashes).
     """
     attendees = []
-    skip_prefixes = ("attendance for", "venue:", "reporting time:", "time:", "-", "/")
+    skip_prefixes = ("attendance", "venue:", "reporting time:", "time:", "location:", "-", "/")
     for raw_line in text.strip().splitlines():
         line = raw_line.strip()
         if not line:
@@ -153,6 +153,54 @@ def parse_attendance_text(text: str) -> list[tuple[str, str, str | None]]:
         if name_m:
             attendees.append((name_m.group(1), "present", None))
     return attendees
+
+
+def parse_attendance_forward(text: str):
+    """
+    Detect and parse a forwarded attendance message like:
+        Attendance 18/03/26
+        name1
+        name2
+        Location: MPSH
+        Time: 745PM
+
+    Returns (date_str, venue, time_str, attendees) or None if not recognised.
+    date_str is in DD/MM/YYYY format.
+    """
+    lines = text.strip().splitlines()
+    if not lines:
+        return None
+
+    # First non-empty line must be "Attendance DD/MM/YY[YY]"
+    first = lines[0].strip()
+    date_m = re.match(
+        r"^Attendance\s+(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})",
+        first, re.IGNORECASE,
+    )
+    if not date_m:
+        return None
+
+    day, month, year = date_m.group(1), date_m.group(2), date_m.group(3)
+    if len(year) == 2:
+        year = "20" + year
+    date_str = f"{day.zfill(2)}/{month.zfill(2)}/{year}"
+
+    venue, time_str = None, None
+    for line in lines[1:]:
+        line = line.strip()
+        loc_m = re.match(r"^Location:\s*(.+)", line, re.IGNORECASE)
+        if loc_m:
+            venue = loc_m.group(1).strip()
+            continue
+        time_m = re.match(r"^Time:\s*(.+)", line, re.IGNORECASE)
+        if time_m:
+            time_str = time_m.group(1).strip()
+
+    if not venue or not time_str:
+        return None
+
+    attendees = parse_attendance_text(text)
+    return date_str, venue, time_str, attendees
 
 
 # ──────────────────────────────────────────────────────────────
@@ -186,41 +234,113 @@ def master_only(func):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role  = db.get_role(update.effective_user.id) or "viewer"
     badge = {"master": "👑 Master", "ic": "🔑 IC", "viewer": "👁 Viewer"}.get(role, role)
+    is_ic = role in ("ic", "master")
 
-    # Reply keyboard — quick-access buttons at bottom of screen
-    if role in ("ic", "master"):
-        keyboard = [
-            ["/inventory", "/whohas"],
-            ["/training", "/attendance"],
-            ["/required", "/delegate"],
-            ["/update", "/clear"],
-        ]
+    lines = [f"*smuHBLogs* — {badge}\n"]
+
+    if is_ic:
+        training = db.get_active_training()
+
+        if not training:
+            lines += [
+                "No upcoming training set.\n",
+                "To get started:",
+                "• Forward an attendance message here — the bot will set it up automatically",
+                "• Or manually: `/training DD/MM/YYYY venue time`\n",
+                "📦 `/inventory` — check current equipment",
+            ]
+            keyboard = [["/inventory", "/whohas"], ["/training", "/help"]]
+        else:
+            attendance = db.get_attendance_rows(training["id"])
+            required   = db.get_required_items(training["id"])
+
+            lines += [
+                f"📅 *{training['date']}* · {training['venue']} · {training['report_time']}\n",
+            ]
+
+            # Attendance status
+            if attendance:
+                present_count = sum(1 for r in attendance if r["status"] != "absent")
+                lines.append(f"✅ Attendance: {present_count} people")
+            else:
+                lines.append("❌ Attendance not set")
+
+            # Required items status
+            if required:
+                lines.append(f"✅ Required items: {len(required)} item(s)")
+            else:
+                lines.append("❌ Required items not set")
+
+            lines.append("")
+
+            # Single clear "what to do next"
+            if not attendance:
+                lines += [
+                    "*Next step:* Set attendance",
+                    "Forward the attendance message here, or reply to it with `/attendance`",
+                ]
+                keyboard = [["/attendance", "/inventory"], ["/required", "/help"]]
+            elif not required:
+                lines += [
+                    "*Next step:* Set required items",
+                    "`/required 10 balls, bibs, tape bag, ...`",
+                ]
+                keyboard = [["/required", "/delegate"], ["/inventory", "/help"]]
+            else:
+                lines += [
+                    "*Ready to go!* Run `/delegate` to generate the equipment plan.",
+                ]
+                keyboard = [["/delegate", "/inventory"], ["/required", "/clear"], ["/help"]]
+
+        lines.append("\n`/help` — all commands")
     else:
+        lines += [
+            "📦 `/inventory` — see all equipment holdings",
+            "📦 `/inventory [item]` — who has something specific",
+            "👤 `/whohas [name]` — what someone is holding",
+        ]
         keyboard = [["/inventory", "/whohas"]]
 
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=reply_markup)
 
-    await update.message.reply_text(
-        f"👋 *smuHBLogs* — {badge}\n\n"
-        "📦 *Anyone:*\n"
-        "`/inventory` — all holdings\n"
-        "`/inventory [item]` — who has something\n"
-        "`/whohas [name]` — what someone holds\n\n"
-        "🔒 *IC commands:*\n"
-        "`/setholding [name] [qty?] [item]`\n"
-        "`/removeitem [name] [item]`\n"
-        "`/transfer [item] from [name] to [name]`\n"
-        "`/update [name] [qty?] [item], ...`\n\n"
-        "`/training [date] [venue] [time]`\n"
-        "`/attendance` — reply to attendance msg\n"
-        "`/required [items, ...]`\n"
-        "`/delegate` — generate delegation plan\n\n"
-        "`/clear training|inventory|all`\n"
-        "`/handover @username`\n"
-        "`/listic` — view who has access\n",
-        parse_mode="Markdown",
-        reply_markup=reply_markup,
-    )
+
+async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    role  = db.get_role(update.effective_user.id) or "viewer"
+    is_ic = role in ("ic", "master")
+
+    lines = ["📖 *All commands*\n"]
+    lines += [
+        "*Anyone:*",
+        "`/inventory` — all holdings",
+        "`/inventory [item]` — who has something",
+        "`/whohas [name]` — what someone holds",
+    ]
+
+    if is_ic:
+        lines += [
+            "",
+            "*Training:*",
+            "`/training [DD/MM/YYYY] [venue] [time]` — create training",
+            "`/attendance` — reply to attendance msg, or forward message directly",
+            "`/required [items, ...]` — set what's needed",
+            "`/delegate` — generate equipment plan",
+            "",
+            "*Inventory:*",
+            "`/setholding [name] [qty?] [item]`",
+            "`/removeitem [name] [item]`",
+            "`/transfer [item] from [name] to [name]`",
+            "`/update [name] [qty?] [item], ...` — bulk update",
+            "",
+            "*Admin:*",
+            "`/clear training|inventory|all`",
+            "`/handover @username`",
+            "`/listic` — who has access",
+        ]
+        if role == "master":
+            lines.append("`/removeic @username`")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -808,14 +928,43 @@ async def handle_text_holdings(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     if not db.is_ic_or_master(update.effective_user.id):
         return
+
+    text = update.message.text.strip()
+
+    # Auto-detect forwarded attendance message
+    parsed = parse_attendance_forward(text)
+    if parsed:
+        date_str, venue, time_str, attendees = parsed
+        tid = db.create_training(date_str, venue, time_str)
+        lines = [
+            f"📅 *Training created (#{tid})*",
+            f"• Date: {date_str}",
+            f"• Venue: {venue.upper()}",
+            f"• Time: {time_str}",
+            "",
+        ]
+        if attendees:
+            db.set_attendance(tid, attendees)
+            present = [n.title() for n, s, _ in attendees if s == "present"]
+            late    = [(n.title(), t) for n, s, t in attendees if s == "late"]
+            lines.append(f"✅ *Attendance set ({len(present) + len(late)} people)*")
+            if present:
+                lines.append(", ".join(present))
+            if late:
+                lines.append("\n*Late:*")
+                for n, t in late:
+                    lines.append(f"• {n} (arriving {t})")
+        else:
+            lines.append("⚠️ No attendees found in message.")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
     if not groq_client:
         await update.message.reply_text("❌ GROQ_API_KEY not configured.")
         return
     if not _check_groq_rate_limit(update.effective_user.id):
         await update.message.reply_text("⏳ Slow down — max 5 AI parses per minute.")
         return
-
-    text = update.message.text.strip()
 
     prompt = f"""You are a parser for a handball team logistics bot.
 Extract holdings from this message. Each entry is a person and what equipment they have.
@@ -882,6 +1031,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("help",        cmd_help))
     app.add_handler(CommandHandler("inventory",   cmd_inventory))
     app.add_handler(CommandHandler("whohas",      cmd_whohas))
     app.add_handler(CommandHandler("acceptic",    cmd_acceptic))
