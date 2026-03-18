@@ -1645,6 +1645,152 @@ async def _sheet_poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("Failed to send sheet update (chat_id=%s): %s", chat_id, e)
 
 
+async def _auto_attendance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Runs every morning (default 7 AM SGT).
+    If today is a training day according to the Google Sheet, automatically:
+      1. Sends the attendance message to the reminder chat
+      2. Runs the equipment delegation plan (unless venue is VR)
+    """
+    if not _sheets_enabled:
+        return
+
+    training = db.get_active_training()
+    if not training or not training.get("reminder_chat_id"):
+        return
+
+    try:
+        training_date = datetime.strptime(training["date"], "%d/%m/%Y").date()
+    except ValueError:
+        return
+
+    if training_date != date.today():
+        return
+
+    chat_id = training["reminder_chat_id"]
+    venue   = training.get("venue", "")
+
+    try:
+        sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, training_date)
+    except Exception as e:
+        logger.warning("Auto-attendance sheet fetch failed: %s", e)
+        return
+
+    if sheet_data is None:
+        return
+
+    # Build coming list + DB attendees
+    coming       = []
+    db_attendees = []
+    for name, parsed in sheet_data["attendance"].items():
+        s = parsed.get("status")
+        if s == "present":
+            coming.append(name)
+            db_attendees.append((name.lower().strip(), "present", None))
+        elif s == "late":
+            parts = ["late"]
+            if parsed.get("reason"):
+                parts.append(parsed["reason"])
+            if parsed.get("eta"):
+                parts.append(parsed["eta"])
+            coming.append(f"{name} ({', '.join(parts)})")
+            db_attendees.append((name.lower().strip(), "late", parsed.get("eta")))
+
+    if not coming:
+        return
+
+    db.set_attendance(training["id"], db_attendees)
+
+    date_str = training_date.strftime("%d/%m/%y")
+    time_str = training.get("report_time") or sheet_data.get("time") or "TBC"
+
+    msg_lines = [f"Attendance {date_str}", ""] + coming + ["", f"Location: {venue}", f"Time: {time_str}"]
+    try:
+        await context.bot.send_message(chat_id=chat_id, text="\n".join(msg_lines))
+    except Exception as e:
+        logger.warning("Auto-attendance send failed: %s", e)
+        return
+
+    # Skip equipment plan for VR
+    if venue.upper().startswith("VR"):
+        return
+
+    required = db.get_required_items(training["id"])
+    if not required:
+        return
+
+    attending = {name.lower().strip() for name, parsed in sheet_data["attendance"].items()
+                 if parsed.get("status") in ("present", "late")}
+
+    inv_map: dict[str, list[tuple[str, int]]] = {}
+    for r in db.get_full_inventory():
+        inv_map.setdefault(r["item"], []).append((r["holder"], r["quantity"]))
+
+    bringing: list[tuple[str, str, int]] = []
+    passes:   list[tuple[str, str, str, int]] = []
+    missing:  list[tuple[str, int]] = []
+
+    for req in required:
+        req_item = req["item"]
+        req_qty  = req["quantity"]
+        holders  = inv_map.get(req_item, [])
+        if not holders:
+            missing.append((req_item, req_qty))
+            continue
+        attending_holders = [(h, q) for h, q in holders if h in attending]
+        absent_holders    = [(h, q) for h, q in holders if h not in attending]
+        covered           = sum(q for _, q in attending_holders)
+        for holder, qty in attending_holders:
+            bringing.append((holder, req_item, qty))
+        remaining = req_qty - covered
+        if remaining > 0:
+            for holder, qty in absent_holders:
+                if remaining <= 0:
+                    break
+                take     = min(qty, remaining)
+                receiver = next(
+                    (b[0] for b in bringing if b[1] == req_item),
+                    next(iter(sorted(attending)), None),
+                )
+                if receiver:
+                    passes.append((holder, receiver, req_item, take))
+                    remaining -= take
+            if remaining > 0:
+                missing.append((req_item, remaining))
+
+    by_holder: dict[str, list[str]] = {}
+    for holder, item, qty in bringing:
+        by_holder.setdefault(holder.title(), []).append(fmt(item, qty))
+
+    plan_lines = [f"📋 *Equipment Plan — {date_str} · {venue} · {time_str}*\n"]
+    if by_holder:
+        plan_lines.append("🟢 *Bringing directly:*")
+        for name, items in sorted(by_holder.items()):
+            plan_lines.append(f"• {name} → {', '.join(items)}")
+        plan_lines.append("")
+    if passes:
+        plan_lines.append("🔄 *Passes needed:*")
+        for from_h, to_h, item, qty in passes:
+            plan_lines.append(f"• {from_h.title()} → pass {fmt(item, qty)} to {to_h.title()}")
+        plan_lines.append("")
+    if missing:
+        plan_lines.append("❓ *Not found / shortfall:*")
+        for item, qty in missing:
+            plan_lines.append(f"• {fmt(item, qty)} — check locker")
+        plan_lines.append("")
+    if not passes and not missing:
+        plan_lines.append("✅ All items covered, no passes needed!")
+
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(plan_lines),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.warning("Auto-attendance delegation send failed: %s", e)
+
+
 # ──────────────────────────────────────────────────────────────
 # SCHEDULED REMINDERS
 # ──────────────────────────────────────────────────────────────
@@ -1771,6 +1917,19 @@ def main():
     if _sheets_enabled:
         app.job_queue.run_repeating(_sheet_poll_job, interval=300, first=10)
         logger.info("Sheet polling job scheduled (every 5 min).")
+
+        # Auto-attendance: runs daily at 3 PM SGT (day before training)
+        now_sgt    = datetime.now(SGT)
+        target_3pm = now_sgt.replace(hour=15, minute=0, second=0, microsecond=0)
+        if target_3pm <= now_sgt:
+            target_3pm += timedelta(days=1)
+        seconds_until = (target_3pm - now_sgt).total_seconds()
+        app.job_queue.run_repeating(
+            _auto_attendance_job,
+            interval=86400,       # every 24 hours
+            first=seconds_until,
+        )
+        logger.info("Auto-attendance job scheduled (daily at 15:00 SGT).")
 
     logger.info("smuHBLogs is running.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
