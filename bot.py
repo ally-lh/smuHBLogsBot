@@ -699,6 +699,131 @@ async def cmd_training(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _build_attendance_msgs(sheet_data: dict, training) -> tuple[str, Optional[str]]:
+    """
+    Build the plain-text attendance message and (optionally) the equipment plan.
+
+    Returns:
+      (attendance_msg, plan_msg)   — plan_msg is None if venue is VR or no required items.
+    Also saves attendance to DB as a side-effect.
+    """
+    training_date = sheet_data["date"]
+    venue    = (training.get("venue") if training else None) or sheet_data.get("venue") or "TBC"
+    time_str = (training.get("report_time") if training else None) or sheet_data.get("time") or "TBC"
+
+    coming       = []
+    db_attendees = []
+    for name, parsed in sheet_data["attendance"].items():
+        s = parsed.get("status")
+        if s == "present":
+            coming.append(name)
+            db_attendees.append((name.lower().strip(), "present", None))
+        elif s == "late":
+            parts = ["late"]
+            if parsed.get("reason"):
+                parts.append(parsed["reason"])
+            if parsed.get("eta"):
+                parts.append(parsed["eta"])
+            coming.append(f"{name} ({', '.join(parts)})")
+            db_attendees.append((name.lower().strip(), "late", parsed.get("eta")))
+
+    if training and db_attendees:
+        db.set_attendance(training["id"], db_attendees)
+
+    date_str = training_date.strftime("%d/%m/%y")
+    att_msg  = "\n".join(
+        [f"Attendance {date_str}", ""] + coming + ["", f"Location: {venue}", f"Time: {time_str}"]
+    )
+
+    # No equipment plan for VR
+    if venue.upper().startswith("VR"):
+        return att_msg, None
+
+    required = db.get_required_items(training["id"]) if training else []
+    if not required:
+        return att_msg, None
+
+    attending = {name.lower().strip() for name, parsed in sheet_data["attendance"].items()
+                 if parsed.get("status") in ("present", "late")}
+
+    inv_map: dict[str, list[tuple[str, int]]] = {}
+    for r in db.get_full_inventory():
+        inv_map.setdefault(r["item"], []).append((r["holder"], r["quantity"]))
+
+    bringing: list[tuple[str, str, int]] = []
+    passes:   list[tuple[str, str, str, int]] = []
+    missing:  list[tuple[str, int]] = []
+
+    for req in required:
+        req_item = req["item"]
+        req_qty  = req["quantity"]
+        holders  = inv_map.get(req_item, [])
+        if not holders:
+            missing.append((req_item, req_qty))
+            continue
+        attending_holders = [(h, q) for h, q in holders if h in attending]
+        absent_holders    = [(h, q) for h, q in holders if h not in attending]
+        covered           = sum(q for _, q in attending_holders)
+        for holder, qty in attending_holders:
+            bringing.append((holder, req_item, qty))
+        remaining = req_qty - covered
+        if remaining > 0:
+            for holder, qty in absent_holders:
+                if remaining <= 0:
+                    break
+                take     = min(qty, remaining)
+                receiver = next(
+                    (b[0] for b in bringing if b[1] == req_item),
+                    next(iter(sorted(attending)), None),
+                )
+                if receiver:
+                    passes.append((holder, receiver, req_item, take))
+                    remaining -= take
+            if remaining > 0:
+                missing.append((req_item, remaining))
+
+    by_holder: dict[str, list[str]] = {}
+    for holder, item, qty in bringing:
+        by_holder.setdefault(holder.title(), []).append(fmt(item, qty))
+
+    plan_lines = [f"📋 *Equipment Plan — {date_str} · {venue} · {time_str}*\n"]
+    if by_holder:
+        plan_lines.append("🟢 *Bringing directly:*")
+        for name, items in sorted(by_holder.items()):
+            plan_lines.append(f"• {name} → {', '.join(items)}")
+        plan_lines.append("")
+    if passes:
+        plan_lines.append("🔄 *Passes needed:*")
+        for from_h, to_h, item, qty in passes:
+            plan_lines.append(f"• {from_h.title()} → pass {fmt(item, qty)} to {to_h.title()}")
+        plan_lines.append("")
+    if missing:
+        plan_lines.append("❓ *Not found / shortfall:*")
+        for item, qty in missing:
+            plan_lines.append(f"• {fmt(item, qty)} — check locker")
+        plan_lines.append("")
+    if not passes and not missing:
+        plan_lines.append("✅ All items covered, no passes needed!")
+
+    plan_lines += ["─────────────────────", "📤 *Copy-paste for group:*\n"]
+    group = [f"Hey team! Equipment plan for {date_str} at {venue} ({time_str}):\n"]
+    if by_holder:
+        group.append("Please bring:")
+        for name, items in sorted(by_holder.items()):
+            group.append(f"• {name} — {', '.join(items)}")
+    if passes:
+        group.append("\nPasses needed before training:")
+        for from_h, to_h, item, qty in passes:
+            group.append(f"• {from_h.title()}, please pass {fmt(item, qty)} to {to_h.title()} ✅")
+    if missing:
+        group.append("\nStill checking:")
+        for item, qty in missing:
+            group.append(f"• {fmt(item, qty)} — will confirm shortly")
+    plan_lines += group
+
+    return att_msg, "\n".join(plan_lines)
+
+
 @ic_only
 async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     training = db.get_active_training()
@@ -715,173 +840,37 @@ async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif context.args:
         text = " ".join(context.args)
     else:
-        # Generate the attendance message from Google Sheet
+        # Show the next 3 upcoming training sessions as buttons
         if not _sheets_enabled:
             await update.message.reply_text(
                 "Reply to the attendance message with `/attendance`\n\n"
                 "Or type names directly:\n"
-                "`/attendance Ally, Eunice, Ruhan (late 9pm)`\n\n"
-                "_Tip: set up Google Sheets integration to auto-generate this._",
+                "`/attendance Ally, Eunice, Ruhan (late 9pm)`",
                 parse_mode="Markdown",
             )
             return
 
         try:
-            training_date = datetime.strptime(training["date"], "%d/%m/%Y").date()
-        except ValueError:
-            await update.message.reply_text("❌ Couldn't parse training date.")
-            return
-
-        try:
-            sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, training_date)
+            sessions = _sheets.get_upcoming_sessions(SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=3)
         except Exception as e:
-            logger.error("Sheet fetch error in /attendance: %s", e)
+            logger.error("Sheet session fetch error: %s", e)
             await update.message.reply_text(f"❌ Couldn't read sheet: {e}")
             return
 
-        if sheet_data is None:
-            await update.message.reply_text(
-                f"❌ No column for {training['date']} found in the sheet."
-            )
+        if not sessions:
+            await update.message.reply_text("❌ No upcoming training sessions found in the sheet.")
             return
 
-        # Build list of people coming, appending late details where applicable
-        # Also build DB-compatible attendees list at the same time
-        coming   = []
-        db_attendees = []
-        for name, parsed in sheet_data["attendance"].items():
-            s = parsed.get("status")
-            if s == "present":
-                coming.append(name)
-                db_attendees.append((name.lower().strip(), "present", None))
-            elif s == "late":
-                parts = ["late"]
-                if parsed.get("reason"):
-                    parts.append(parsed["reason"])
-                if parsed.get("eta"):
-                    parts.append(parsed["eta"])
-                coming.append(f"{name} ({', '.join(parts)})")
-                db_attendees.append((name.lower().strip(), "late", parsed.get("eta")))
+        keyboard = []
+        for s in sessions:
+            label         = s["date"].strftime("%-d %b") + f"  ·  {s['venue']}  ·  {s['time']}"
+            callback_data = f"att_pick_{s['date'].strftime('%d%m%Y')}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=callback_data)])
 
-        if not coming:
-            await update.message.reply_text("❌ Nobody is marked as coming in the sheet yet.")
-            return
-
-        # Save attendance to DB so delegation can use it
-        db.set_attendance(training["id"], db_attendees)
-
-        # Format: Attendance DD/MM/YY  (2-digit year)
-        date_str = training_date.strftime("%d/%m/%y")
-        venue    = training.get("venue") or sheet_data.get("venue") or "TBC"
-        time_str = training.get("report_time") or sheet_data.get("time") or "TBC"
-
-        msg_lines = [f"Attendance {date_str}", ""]
-        msg_lines += coming
-        msg_lines += ["", f"Location: {venue}", f"Time: {time_str}"]
-
-        await update.message.reply_text("\n".join(msg_lines))
-
-        # Skip equipment delegation for VR trainings
-        if venue.upper().startswith("VR"):
-            return
-
-        required = db.get_required_items(training["id"])
-        if not required:
-            await update.message.reply_text(
-                "ℹ️ *Attendance saved.* No required items set yet.\n"
-                "Run `/required 10 balls, bibs, ...` to set them, then `/delegate` for the equipment plan.",
-                parse_mode="Markdown",
-            )
-            return
-
-        # Auto-run delegation ─────────────────────────────────────
-        attending = {name.lower().strip() for name, parsed in sheet_data["attendance"].items()
-                     if parsed.get("status") in ("present", "late")}
-
-        inv_map: dict[str, list[tuple[str, int]]] = {}
-        for r in db.get_full_inventory():
-            inv_map.setdefault(r["item"], []).append((r["holder"], r["quantity"]))
-
-        bringing: list[tuple[str, str, int]] = []
-        passes:   list[tuple[str, str, str, int]] = []
-        missing:  list[tuple[str, int]] = []
-
-        for req in required:
-            req_item = req["item"]
-            req_qty  = req["quantity"]
-            holders  = inv_map.get(req_item, [])
-            if not holders:
-                missing.append((req_item, req_qty))
-                continue
-            attending_holders = [(h, q) for h, q in holders if h in attending]
-            absent_holders    = [(h, q) for h, q in holders if h not in attending]
-            covered           = sum(q for _, q in attending_holders)
-            for holder, qty in attending_holders:
-                bringing.append((holder, req_item, qty))
-            remaining = req_qty - covered
-            if remaining > 0:
-                for holder, qty in absent_holders:
-                    if remaining <= 0:
-                        break
-                    take     = min(qty, remaining)
-                    receiver = next(
-                        (b[0] for b in bringing if b[1] == req_item),
-                        next(iter(sorted(attending)), None),
-                    )
-                    if receiver:
-                        passes.append((holder, receiver, req_item, take))
-                        remaining -= take
-                if remaining > 0:
-                    missing.append((req_item, remaining))
-
-        by_holder: dict[str, list[str]] = {}
-        for holder, item, qty in bringing:
-            by_holder.setdefault(holder.title(), []).append(fmt(item, qty))
-
-        plan_lines = [
-            "📋 *Equipment Plan*",
-            f"📅 {training['date']} · {venue} · {time_str}\n",
-        ]
-        if by_holder:
-            plan_lines.append("🟢 *Bringing directly:*")
-            for name, items in sorted(by_holder.items()):
-                plan_lines.append(f"• {name} → {', '.join(items)}")
-            plan_lines.append("")
-        if passes:
-            plan_lines.append("🔄 *Passes needed:*")
-            for from_h, to_h, item, qty in passes:
-                plan_lines.append(f"• {from_h.title()} → pass {fmt(item, qty)} to {to_h.title()}")
-            plan_lines.append("")
-        if missing:
-            plan_lines.append("❓ *Not found / shortfall:*")
-            for item, qty in missing:
-                plan_lines.append(f"• {fmt(item, qty)} — check locker")
-            plan_lines.append("")
-        if not passes and not missing:
-            plan_lines.append("✅ All items covered, no passes needed!")
-
-        plan_lines += [
-            "─────────────────────",
-            "📤 *Copy-paste for group:*\n",
-        ]
-        group = [
-            f"Hey team! Equipment plan for {training['date']} at {venue} ({time_str}):\n"
-        ]
-        if by_holder:
-            group.append("Please bring:")
-            for name, items in sorted(by_holder.items()):
-                group.append(f"• {name} — {', '.join(items)}")
-        if passes:
-            group.append("\nPasses needed before training:")
-            for from_h, to_h, item, qty in passes:
-                group.append(f"• {from_h.title()}, please pass {fmt(item, qty)} to {to_h.title()} ✅")
-        if missing:
-            group.append("\nStill checking:")
-            for item, qty in missing:
-                group.append(f"• {fmt(item, qty)} — will confirm shortly")
-
-        plan_lines += group
-        await update.message.reply_text("\n".join(plan_lines), parse_mode="Markdown")
+        await update.message.reply_text(
+            "Which training do you want the attendance list for?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
         return
 
     attendees = parse_attendance_text(text)
@@ -907,6 +896,75 @@ async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"• {n} (arriving {t})")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def callback_attendance_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle training date selection from /attendance inline keyboard."""
+    query = update.callback_query
+    await query.answer()
+
+    if not db.is_ic_or_master(query.from_user.id):
+        await query.edit_message_text("🔒 IC or master access required.")
+        return
+
+    date_str = query.data.replace("att_pick_", "")  # DDMMYYYY
+    try:
+        target_date = datetime.strptime(date_str, "%d%m%Y").date()
+    except ValueError:
+        await query.edit_message_text("❌ Invalid date.")
+        return
+
+    await query.edit_message_text(f"⏳ Fetching sheet for {target_date.strftime('%-d %b %Y')}…")
+
+    try:
+        sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, target_date)
+    except Exception as e:
+        logger.error("Sheet fetch error in att_pick: %s", e)
+        await query.edit_message_text(f"❌ Couldn't read sheet: {e}")
+        return
+
+    if sheet_data is None:
+        await query.edit_message_text(
+            f"❌ No column for {target_date.strftime('%-d %b %Y')} found in the sheet."
+        )
+        return
+
+    # Match against active training (if dates align, save to DB + run delegation)
+    training = db.get_active_training()
+    matched_training = None
+    if training:
+        try:
+            t_date = datetime.strptime(training["date"], "%d/%m/%Y").date()
+            if t_date == target_date:
+                matched_training = training
+        except ValueError:
+            pass
+
+    att_msg, plan_msg = _build_attendance_msgs(sheet_data, matched_training)
+
+    if not any(
+        p.get("status") in ("present", "late")
+        for p in sheet_data["attendance"].values()
+    ):
+        await query.edit_message_text("❌ Nobody is marked as coming in the sheet yet.")
+        return
+
+    await query.edit_message_text(att_msg)
+    if plan_msg:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=plan_msg,
+            parse_mode="Markdown",
+        )
+    elif matched_training and not matched_training.get("venue", "").upper().startswith("VR"):
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=(
+                "ℹ️ *Attendance saved.* No required items set yet.\n"
+                "Run `/required 10 balls, bibs, ...` then `/delegate` for the equipment plan."
+            ),
+            parse_mode="Markdown",
+        )
 
 
 @ic_only
@@ -1876,6 +1934,10 @@ def main():
     db.init_db(MASTER_ID)
     logger.info("Database initialised. Master ID: %d", MASTER_ID)
 
+    purged = db.purge_old_trainings(days=14)
+    if purged:
+        logger.info("Purged %d training record(s) older than 14 days.", purged)
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Reschedule reminders for any active training that survived a restart
@@ -1911,6 +1973,7 @@ def main():
     app.add_handler(CommandHandler("handover",          cmd_handover))
     app.add_handler(CommandHandler("removeic",          cmd_removeic))
     app.add_handler(CommandHandler("sheetattendance",   cmd_sheetattendance))
+    app.add_handler(CallbackQueryHandler(callback_attendance_pick, pattern="^att_pick_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_holdings))
 
     # Poll Google Sheet every 5 minutes on training days

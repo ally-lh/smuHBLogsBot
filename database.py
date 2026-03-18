@@ -367,6 +367,33 @@ def get_attendance_rows(training_id: int) -> list:
     return rows
 
 
+def purge_old_trainings(days: int = 14) -> int:
+    """Delete training sessions (and their attendance/required data) older than `days` days.
+    Returns the number of training rows deleted."""
+    from datetime import date, timedelta, datetime
+    cutoff = date.today() - timedelta(days=days)
+    conn = get_conn()
+    # Find old training IDs — compare stored DD/MM/YYYY date strings
+    rows = conn.execute(
+        "SELECT id, date FROM training WHERE status != 'scheduled'"
+    ).fetchall()
+    old_ids = []
+    for row in rows:
+        try:
+            d = datetime.strptime(row["date"], "%d/%m/%Y").date()
+            if d < cutoff:
+                old_ids.append(row["id"])
+        except ValueError:
+            pass
+    for tid in old_ids:
+        conn.execute("DELETE FROM attendance WHERE training_id = ?", (tid,))
+        conn.execute("DELETE FROM training_required WHERE training_id = ?", (tid,))
+        conn.execute("DELETE FROM training WHERE id = ?", (tid,))
+    conn.commit()
+    conn.close()
+    return len(old_ids)
+
+
 def clear_active_training() -> bool:
     """Cancel the current scheduled training and wipe its attendance/required data."""
     conn = get_conn()

@@ -13,7 +13,7 @@ Sheet layout assumed:
 import re
 import json
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 import gspread
@@ -167,6 +167,57 @@ def _find_date_column(date_row: list, target: date) -> Optional[int]:
         if m and int(m.group(1)) == target_day and m.group(2).lower() == target_month:
             return i
     return None
+
+
+# ──────────────────────────────────────────────────────────────
+# UPCOMING SESSIONS
+# ──────────────────────────────────────────────────────────────
+
+def get_upcoming_sessions(
+    spreadsheet_id: str,
+    sheet_name: str,
+    creds_path: str,
+    limit: int = 3,
+) -> list[dict]:
+    """
+    Return the next `limit` training sessions from today onwards.
+    Each entry: {"date": date, "venue": str, "time": str}
+    """
+    client = _get_client(creds_path)
+    sheet  = client.open_by_key(spreadsheet_id).worksheet(sheet_name)
+    rows   = sheet.get_all_values()
+
+    if len(rows) <= _DATE_ROW:
+        return []
+
+    today     = date.today()
+    date_row  = rows[_DATE_ROW]
+    venue_row = rows[_VENUE_ROW] if len(rows) > _VENUE_ROW else []
+    time_row  = rows[_TIME_ROW]  if len(rows) > _TIME_ROW  else []
+
+    sessions = []
+    for i, cell in enumerate(date_row):
+        m = re.match(r'^\s*(\d{1,2})\s+([A-Za-z]{3})', cell.strip())
+        if not m:
+            continue
+        day   = int(m.group(1))
+        month = m.group(2)
+        # Try current year, then next year
+        for year in (today.year, today.year + 1):
+            try:
+                d = datetime.strptime(f"{day} {month} {year}", "%d %b %Y").date()
+            except ValueError:
+                continue
+            if d >= today:
+                sessions.append({
+                    "date":  d,
+                    "venue": venue_row[i].strip() if i < len(venue_row) else "",
+                    "time":  time_row[i].strip()  if i < len(time_row)  else "",
+                })
+                break
+
+    sessions.sort(key=lambda s: s["date"])
+    return sessions[:limit]
 
 
 # ──────────────────────────────────────────────────────────────
