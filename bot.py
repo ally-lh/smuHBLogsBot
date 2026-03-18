@@ -59,9 +59,10 @@ logger = logging.getLogger(__name__)
 MASTER_ID    = int(os.getenv("MASTER_ID", "605114234"))
 BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-SHEET_ID     = os.getenv("SHEET_ID", "")
-SHEET_NAME   = os.getenv("SHEET_NAME", "Sheet1")
-SHEET_CREDS  = os.getenv("SHEET_CREDS", "service_account.json")
+SHEET_ID             = os.getenv("SHEET_ID", "")
+SHEET_NAME           = os.getenv("SHEET_NAME", "Sheet1")
+SHEET_POSITIONS_NAME = os.getenv("SHEET_POSNAME", "sheet71")
+SHEET_CREDS          = os.getenv("SHEET_CREDS", "service_account.json")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set.")
@@ -969,6 +970,136 @@ async def callback_attendance_pick(update: Update, context: ContextTypes.DEFAULT
             ),
             parse_mode="Markdown",
         )
+
+
+# Position grouping for /attendancepos
+_POS_ORDER = ["Goalkeeper", "Pivot", "Back", "Wing"]
+_POS_LABELS = {
+    "Goalkeeper": "Keeper",
+    "Pivot":      "Pivots",
+    "Back":       "CBs",
+    "Wing":       "Wings",
+}
+
+
+def _build_attendancepos_msg(sheet_data: dict, positions: dict) -> str:
+    """Build a position-grouped attendance message from sheet data and positions roster."""
+    training_date = sheet_data["date"]
+    venue    = sheet_data.get("venue") or "TBC"
+    time_str = sheet_data.get("time")  or "TBC"
+    date_str = training_date.strftime("%d/%m/%y")
+
+    attendance = sheet_data["attendance"]
+
+    # Group attending players by position
+    groups: dict[str, list[str]] = {pos: [] for pos in _POS_ORDER}
+    unknown: list[str] = []
+    for name, parsed in attendance.items():
+        if parsed.get("status") not in ("present", "late"):
+            continue
+        pos = positions.get(name, "")
+        if pos in groups:
+            groups[pos].append(name)
+        else:
+            unknown.append(name)
+
+    lines = [f"Attendance {date_str}", ""]
+    for pos in _POS_ORDER:
+        members = groups[pos]
+        if not members:
+            continue
+        label = _POS_LABELS[pos]
+        lines.append(f"{label} ({len(members)})")
+        for m in members:
+            lines.append(m)
+        lines.append("")
+
+    if unknown:
+        lines.append(f"Others ({len(unknown)})")
+        for m in unknown:
+            lines.append(m)
+        lines.append("")
+
+    lines += [f"Location: {venue}", f"Time: {time_str}"]
+    return "\n".join(lines)
+
+
+@ic_only
+async def cmd_attendancepos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show attendance grouped by position, fetched from Google Sheets."""
+    if not _sheets_enabled:
+        await update.message.reply_text("❌ Google Sheets integration is not enabled.")
+        return
+
+    try:
+        sessions = _sheets.get_upcoming_sessions(SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=3)
+    except Exception as e:
+        logger.error("Sheet session fetch error: %s", e)
+        await update.message.reply_text(f"❌ Couldn't read sheet: {e}")
+        return
+
+    if not sessions:
+        await update.message.reply_text("❌ No upcoming training sessions found in the sheet.")
+        return
+
+    keyboard = []
+    for s in sessions:
+        label         = s["date"].strftime("%-d %b") + f"  ·  {s['venue']}  ·  {s['time']}"
+        callback_data = f"attpos_pick_{s['date'].strftime('%d%m%Y')}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=callback_data)])
+
+    await update.message.reply_text(
+        "Which training do you want the position attendance for?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def callback_attpos_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle training date selection from /attendancepos inline keyboard."""
+    query = update.callback_query
+    await query.answer()
+
+    if not db.is_ic_or_master(query.from_user.id):
+        await query.edit_message_text("🔒 IC or master access required.")
+        return
+
+    date_str = query.data.replace("attpos_pick_", "")  # DDMMYYYY
+    try:
+        target_date = datetime.strptime(date_str, "%d%m%Y").date()
+    except ValueError:
+        await query.edit_message_text("❌ Invalid date.")
+        return
+
+    await query.edit_message_text(f"⏳ Fetching sheet for {target_date.strftime('%-d %b %Y')}…")
+
+    try:
+        sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, target_date)
+    except Exception as e:
+        logger.error("Sheet fetch error in attpos_pick: %s", e)
+        await query.edit_message_text(f"❌ Couldn't read sheet: {e}")
+        return
+
+    if sheet_data is None:
+        await query.edit_message_text(
+            f"❌ No column for {target_date.strftime('%-d %b %Y')} found in the sheet."
+        )
+        return
+
+    if not any(
+        p.get("status") in ("present", "late")
+        for p in sheet_data["attendance"].values()
+    ):
+        await query.edit_message_text("❌ Nobody is marked as coming in the sheet yet.")
+        return
+
+    try:
+        positions = _sheets.get_positions(SHEET_ID, SHEET_POSITIONS_NAME, SHEET_CREDS)
+    except Exception as e:
+        logger.error("Position sheet fetch error in attpos_pick: %s", e)
+        positions = {}
+
+    msg = _build_attendancepos_msg(sheet_data, positions)
+    await query.edit_message_text(msg)
 
 
 @ic_only
@@ -1966,8 +2097,9 @@ def main():
     app.add_handler(CommandHandler("update",      cmd_update))
 
     app.add_handler(CommandHandler("training",    cmd_training))
-    app.add_handler(CommandHandler("attendance",  cmd_attendance))
-    app.add_handler(CommandHandler("required",    cmd_required))
+    app.add_handler(CommandHandler("attendance",    cmd_attendance))
+    app.add_handler(CommandHandler("attendancepos", cmd_attendancepos))
+    app.add_handler(CommandHandler("required",      cmd_required))
     app.add_handler(CommandHandler("delegate",    cmd_delegate))
 
     app.add_handler(CommandHandler("clear",             cmd_clear))
@@ -1978,6 +2110,7 @@ def main():
     app.add_handler(CommandHandler("removeic",          cmd_removeic))
     app.add_handler(CommandHandler("sheetattendance",   cmd_sheetattendance))
     app.add_handler(CallbackQueryHandler(callback_attendance_pick, pattern="^att_pick_"))
+    app.add_handler(CallbackQueryHandler(callback_attpos_pick,    pattern="^attpos_pick_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_holdings))
 
     # Poll Google Sheet every 5 minutes on training days

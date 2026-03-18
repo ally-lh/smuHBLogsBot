@@ -276,3 +276,35 @@ def get_attendance(
         "time":       time_str,
         "attendance": attendance,
     }
+
+
+# ──────────────────────────────────────────────────────────────
+# POSITIONS
+# ──────────────────────────────────────────────────────────────
+
+def get_positions(
+    spreadsheet_id: str,
+    sheet_name: str,
+    creds_path: str,
+) -> dict[str, str]:
+    """
+    Read the positions roster from a dedicated sheet tab (e.g. "sheet71").
+
+    Expects the same layout as the attendance sheet:
+      rows 1-3  : header/instructions (skipped)
+      row  4    : "Start Warmup at" label (skipped)
+      row  5+   : col A = player name, col B = position
+
+    Returns {name: position} for every row that has both a name and a position.
+    """
+    client = _get_client(creds_path)
+    sheet  = client.open_by_key(spreadsheet_id).worksheet(sheet_name)
+    rows   = sheet.get_all_values()
+
+    positions: dict[str, str] = {}
+    for row in rows[_DATA_ROW_START:]:
+        name = row[0].strip() if len(row) > 0 else ""
+        pos  = row[1].strip() if len(row) > 1 else ""
+        if name and pos:
+            positions[name] = pos
+    return positions
