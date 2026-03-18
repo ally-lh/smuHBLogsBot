@@ -1146,23 +1146,46 @@ async def callback_attpos_pick(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(f"❌ Something went wrong: {e}")
 
 
+async def _show_required_session_picker(reply_fn):
+    """Fetch upcoming sessions from the sheet and show as inline buttons."""
+    try:
+        sessions = _sheets.get_upcoming_sessions(SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=3)
+    except Exception as e:
+        logger.error("Sheet session fetch error: %s", e)
+        await reply_fn(f"❌ Couldn't read sheet: {e}")
+        return
+
+    if not sessions:
+        await reply_fn("❌ No upcoming training sessions found in the sheet.")
+        return
+
+    keyboard = []
+    for s in sessions:
+        label         = s["date"].strftime("%-d %b") + f"  ·  {s['venue']}  ·  {s['time']}"
+        callback_data = f"req_pick_{s['date'].strftime('%d%m%Y')}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=callback_data)])
+
+    await reply_fn(
+        "Which training do you want to set required items for?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
 @ic_only
 async def cmd_required(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text(
-            "Usage: `/required [items, ...]`\n"
-            "Example: `/required 10 balls, bibs, bands, tape bag, marker discs`",
-            parse_mode="Markdown",
-        )
-        return
-
-    items = parse_items_list(" ".join(context.args))
-    if not items:
-        await update.message.reply_text("❌ Couldn't parse any items.")
-        return
-
     if not _sheets_enabled:
-        # Fallback: apply to active training directly
+        # No sheets: require items upfront and apply to active training
+        if not context.args:
+            await update.message.reply_text(
+                "Usage: `/required [items, ...]`\n"
+                "Example: `/required 10 balls, bibs, bands, tape bag, marker discs`",
+                parse_mode="Markdown",
+            )
+            return
+        items = parse_items_list(" ".join(context.args))
+        if not items:
+            await update.message.reply_text("❌ Couldn't parse any items.")
+            return
         training = db.get_active_training()
         if not training:
             await update.message.reply_text(
@@ -1177,30 +1200,7 @@ async def cmd_required(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         return
 
-    # Store items and show session picker
-    context.user_data["req_items"] = items
-
-    try:
-        sessions = _sheets.get_upcoming_sessions(SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=3)
-    except Exception as e:
-        logger.error("Sheet session fetch error: %s", e)
-        await update.message.reply_text(f"❌ Couldn't read sheet: {e}")
-        return
-
-    if not sessions:
-        await update.message.reply_text("❌ No upcoming training sessions found in the sheet.")
-        return
-
-    keyboard = []
-    for s in sessions:
-        label         = s["date"].strftime("%-d %b") + f"  ·  {s['venue']}  ·  {s['time']}"
-        callback_data = f"req_pick_{s['date'].strftime('%d%m%Y')}"
-        keyboard.append([InlineKeyboardButton(label, callback_data=callback_data)])
-
-    await update.message.reply_text(
-        "Which training do you want to set required items for?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    await _show_required_session_picker(update.message.reply_text)
 
 
 async def callback_required_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1219,14 +1219,6 @@ async def callback_required_pick(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("❌ Invalid date.")
         return
 
-    items = context.user_data.get("req_items")
-    if not items:
-        await query.edit_message_text(
-            "❌ No items found. Please run `/required` again.",
-            parse_mode="Markdown",
-        )
-        return
-
     date_for_db = target_date.strftime("%d/%m/%Y")
     matched_training = db.get_training_by_date(date_for_db)
     if matched_training:
@@ -1240,13 +1232,12 @@ async def callback_required_pick(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    db.set_required_items(matched_training["id"], items)
-    context.user_data.pop("req_items", None)
-
-    lines = [f"✅ *Required for {matched_training['date']} ({matched_training['venue']}):*\n"]
-    for item, qty in items:
-        lines.append(f"• {fmt(item, qty)}")
-    await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+    context.user_data["req_training"] = dict(matched_training)
+    await query.edit_message_text(
+        f"✅ *{matched_training['date']} ({matched_training['venue']})* selected.\n\n"
+        "Please enter the required items (e.g. `10 balls, bibs, tape bag`).",
+        parse_mode="Markdown",
+    )
 
 
 @ic_only
@@ -1709,6 +1700,20 @@ async def handle_text_holdings(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     user = update.effective_user
     text = update.message.text.strip()
+
+    # IC awaiting required-items input after picking a training session
+    if db.is_ic_or_master(user.id) and context.user_data.get("req_training"):
+        training = context.user_data.pop("req_training")
+        items = parse_items_list(text)
+        if not items:
+            await update.message.reply_text("❌ Couldn't parse any items. Try again with `/required`.", parse_mode="Markdown")
+            return
+        db.set_required_items(training["id"], items)
+        lines = [f"✅ *Required for {training['date']} ({training['venue']}):*\n"]
+        for item, qty in items:
+            lines.append(f"• {fmt(item, qty)}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
 
     if not db.is_ic_or_master(user.id):
         # Non-IC: only handle if training has started today
