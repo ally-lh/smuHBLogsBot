@@ -278,6 +278,16 @@ def rename_holder(old_name: str, new_name: str) -> int:
     return len(rows)
 
 
+def get_all_holders() -> list[str]:
+    """Return all distinct holder names currently in inventory, sorted."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT holder FROM inventory ORDER BY holder"
+    ).fetchall()
+    conn.close()
+    return [r["holder"] for r in rows]
+
+
 def clear_inventory() -> None:
     conn = get_conn()
     conn.execute("DELETE FROM inventory")

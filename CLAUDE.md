@@ -80,6 +80,7 @@ Display labels:  `Keeper`,     `Pivots`, `CBs`, `Wings`
 - `/start` — welcome message + status
 - `/inventory [item?]` — view all holdings or search by item
 - `/whohas [name]` — see what someone holds
+- `/players` — list all player names currently in the DB
 - `/acceptic` — accept a pending IC handover
 - `/help` — this list
 

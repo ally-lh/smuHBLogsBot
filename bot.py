@@ -10,6 +10,7 @@ Public (anyone can DM the bot):
   /inventory           — see all holdings
   /inventory [item]    — who has a specific item
   /whohas [name]       — what someone is holding
+  /players             — list all player names in the DB
   /acceptic            — accept a pending IC handover
 
 IC-only:
@@ -107,6 +108,19 @@ def _check_groq_rate_limit(user_id: int) -> bool:
 def fmt(item: str, qty: int) -> str:
     """Format item with quantity. '4x balls' or just 'bibs'."""
     return f"{qty}x {item}" if qty > 1 else item
+
+
+# Map nicknames → canonical DB names to prevent double-counting.
+# Add entries here whenever a short name causes a duplicate holder.
+NAME_ALIASES: dict[str, str] = {
+    "ally": "allison",
+    "sera": "seraphina",
+}
+
+
+def resolve_name(name: str) -> str:
+    """Return the canonical name for a nickname, or the name itself if not aliased."""
+    return NAME_ALIASES.get(name.lower().strip(), name.lower().strip())
 
 
 def parse_name_qty_item(tokens: list[str]) -> tuple[str, int, str]:
@@ -336,6 +350,7 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         "/inventory — view all equipment holdings",
         "/inventory [item] — see who has a specific item",
         "/whohas [name] — see what someone is holding",
+        "/players — list all player names in the DB",
         "/acceptic — accept a pending IC handover",
     ]
 
@@ -412,7 +427,7 @@ async def cmd_whohas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: `/whohas [name]`", parse_mode="Markdown")
         return
-    name = " ".join(context.args)
+    name = resolve_name(" ".join(context.args))
     rows = db.search_inventory_by_holder(name)
     if not rows:
         await update.message.reply_text(
@@ -423,6 +438,21 @@ async def cmd_whohas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"🎒 *{name.title()} is holding:*\n"]
     for r in rows:
         lines.append(f"• {fmt(r['item'], r['quantity'])}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_players(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    """List all player names currently in the inventory DB."""
+    holders = db.get_all_holders()
+    if not holders:
+        await update.message.reply_text(
+            "📭 No players in the DB yet.\nUse `/update` or `/setholding` to log inventory.",
+            parse_mode="Markdown",
+        )
+        return
+    lines = [f"👥 *Players in DB ({len(holders)}):*\n"]
+    for h in holders:
+        lines.append(f"• {h.title()}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -442,7 +472,8 @@ async def cmd_setholding(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
         return
-    name, qty, item = parse_name_qty_item(context.args)
+    raw_name, qty, item = parse_name_qty_item(context.args)
+    name = resolve_name(raw_name)
     if not item:
         await update.message.reply_text("❌ Missing item name.")
         return
@@ -526,7 +557,9 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
         return
-    item, from_h, to_h = match.group(1).strip(), match.group(2), match.group(3)
+    item  = match.group(1).strip()
+    from_h = resolve_name(match.group(2))
+    to_h   = resolve_name(match.group(3))
     if db.transfer_item(item, from_h, to_h):
         await update.message.reply_text(
             f"🔄 *{item.title()}* transferred from *{from_h.title()}* → *{to_h.title()}*.",
@@ -1558,7 +1591,7 @@ def _apply_holdings(entries: list) -> dict[str, list[str]]:
     """Write entries to DB. Returns {DisplayName: [formatted items]} for reply."""
     by_holder: dict[str, list[str]] = {}
     for e in entries:
-        name = str(e["name"]).lower().strip()
+        name = resolve_name(str(e["name"]))
         item = str(e["item"]).lower().strip()
         qty  = int(e.get("quantity", 1))
         db.set_holding(name, item, qty)
@@ -2090,6 +2123,7 @@ def main():
     app.add_handler(CommandHandler("help",        cmd_help))
     app.add_handler(CommandHandler("inventory",   cmd_inventory))
     app.add_handler(CommandHandler("whohas",      cmd_whohas))
+    app.add_handler(CommandHandler("players",     cmd_players))
     app.add_handler(CommandHandler("acceptic",    cmd_acceptic))
 
     app.add_handler(CommandHandler("setholding",  cmd_setholding))
