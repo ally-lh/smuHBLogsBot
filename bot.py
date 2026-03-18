@@ -67,7 +67,7 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set.")
 
 # Google Sheets integration (optional — only active when SHEET_ID is set)
-_sheets_enabled = bool(SHEET_ID and os.path.exists(SHEET_CREDS))
+_sheets_enabled = bool(SHEET_ID and SHEET_CREDS)
 if _sheets_enabled:
     import sheets as _sheets
     logger.info("Google Sheets integration enabled (sheet: %s / %s)", SHEET_ID, SHEET_NAME)
