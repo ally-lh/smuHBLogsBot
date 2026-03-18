@@ -85,8 +85,8 @@ Display labels:  `Keeper`,     `Pivots`, `CBs`, `Wings`
 - `/help` — this list
 
 ### IC-only (Training)
-- `/training [DD/MM/YYYY] [venue] [time]` — create a training session
-- `/attendance` — pick a session, pull attendance from sheet, save to DB
+- `/attendance` — pick a session from sheet, auto-creates training record if needed, save to DB
+- `/training [DD/MM/YYYY] [venue] [time]` — manually create a training session (optional)
 - `/attendancepos` — same picker, output grouped by position (reads from sheet71)
 - `/sheetattendance [DD/MM/YYYY]` — pull attendance for a specific date
 - `/required [items, ...]` — set equipment needed

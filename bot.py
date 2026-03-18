@@ -18,8 +18,8 @@ IC-only:
   /removeitem [name] [item]
   /transfer [item] from [name] to [name]
   /update [name] [qty?] [item], ...     ← bulk post-training update
-  /training [DD/MM/YYYY] [venue] [time]
-  /attendance                           ← reply to the attendance msg
+  /attendance                           ← pick session from sheet; auto-creates training record
+  /training [DD/MM/YYYY] [venue] [time] ← optional: manually create training
   /attendancepos                        ← attendance grouped by position (reads sheet71)
   /required [items, ...]
   /delegate                             ← generate delegation plan + copy-paste message
@@ -358,8 +358,8 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         lines += [
             "",
             "<b>Training:</b>",
-            "/training [DD/MM/YYYY] [venue] [time] — create a training session",
-            "/attendance — pick from upcoming sessions (Google Sheets)",
+            "/attendance — pick from upcoming sessions (auto-creates record)",
+            "/training [DD/MM/YYYY] [venue] [time] — manually create a training session",
             "/attendancepos — same as /attendance but grouped by position",
             "/sheetattendance [DD/MM/YYYY] — pull attendance for a specific date",
             "/required [items, ...] — set equipment needed for training",
@@ -908,7 +908,8 @@ async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not training:
         await update.message.reply_text(
-            "❌ No active training. Create one first with `/training`.",
+            "❌ No active training found.\n"
+            "Use `/attendance` without arguments to pick a session from the sheet.",
             parse_mode="Markdown",
         )
         return
@@ -969,16 +970,16 @@ async def callback_attendance_pick(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
-    # Match against active training (if dates align, save to DB + run delegation)
-    training = db.get_active_training()
-    matched_training = None
-    if training:
-        try:
-            t_date = datetime.strptime(training["date"], "%d/%m/%Y").date()
-            if t_date == target_date:
-                matched_training = training
-        except ValueError:
-            pass
+    # Find or auto-create a training record for this date
+    date_for_db = target_date.strftime("%d/%m/%Y")
+    matched_training = db.get_training_by_date(date_for_db)
+    if not matched_training:
+        venue    = sheet_data.get("venue") or "TBC"
+        time_str = sheet_data.get("time") or "TBC"
+        chat_id  = query.message.chat_id
+        tid = db.create_training(date_for_db, venue, time_str, reminder_chat_id=chat_id)
+        _schedule_training_reminders(context.application, tid, date_for_db, chat_id)
+        matched_training = db.get_training_by_date(date_for_db)
 
     att_msg, plan_msg = _build_attendance_msgs(sheet_data, matched_training)
 

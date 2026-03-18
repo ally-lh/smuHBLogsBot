@@ -309,6 +309,17 @@ def get_active_training() -> Optional[sqlite3.Row]:
     return row
 
 
+def get_training_by_date(date_str: str) -> Optional[sqlite3.Row]:
+    """Return the training record for the given DD/MM/YYYY date, or None."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM training WHERE date = ? ORDER BY rowid DESC LIMIT 1",
+        (date_str,)
+    ).fetchone()
+    conn.close()
+    return row
+
+
 def create_training(date: str, venue: str, report_time: str, reminder_chat_id: int = None) -> int:
     conn = get_conn()
     cur = conn.execute(
@@ -385,7 +396,7 @@ def purge_old_trainings(days: int = 14) -> int:
     conn = get_conn()
     # Find old training IDs — compare stored DD/MM/YYYY date strings
     rows = conn.execute(
-        "SELECT id, date FROM training WHERE status != 'scheduled'"
+        "SELECT id, date FROM training"
     ).fetchall()
     old_ids = []
     for row in rows:
