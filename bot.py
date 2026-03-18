@@ -32,7 +32,9 @@ Master-only:
 import os
 import re
 import json
+import time
 import logging
+from collections import defaultdict, deque
 from dotenv import load_dotenv
 load_dotenv()
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -59,6 +61,22 @@ if not BOT_TOKEN:
 
 from groq import Groq
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+# Rate limit: max 5 Groq calls per user per 60 seconds
+_GROQ_RATE_LIMIT = 5
+_GROQ_RATE_WINDOW = 60
+_groq_calls: dict[int, deque] = defaultdict(deque)
+
+def _check_groq_rate_limit(user_id: int) -> bool:
+    """Returns True if the user is allowed to make a Groq call, False if rate-limited."""
+    now = time.monotonic()
+    q = _groq_calls[user_id]
+    while q and now - q[0] > _GROQ_RATE_WINDOW:
+        q.popleft()
+    if len(q) >= _GROQ_RATE_LIMIT:
+        return False
+    q.append(now)
+    return True
 
 
 # ──────────────────────────────────────────────────────────────
@@ -792,6 +810,9 @@ async def handle_text_holdings(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     if not groq_client:
         await update.message.reply_text("❌ GROQ_API_KEY not configured.")
+        return
+    if not _check_groq_rate_limit(update.effective_user.id):
+        await update.message.reply_text("⏳ Slow down — max 5 AI parses per minute.")
         return
 
     text = update.message.text.strip()
