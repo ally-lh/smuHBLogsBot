@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 bot.py — smuHBLogs Telegram Bot
 Handball team logistics tracker for SMU.
@@ -31,8 +32,10 @@ Master-only:
 import os
 import re
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from dotenv import load_dotenv
+load_dotenv()
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 import database as db
 
@@ -160,6 +163,20 @@ def master_only(func):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role  = db.get_role(update.effective_user.id) or "viewer"
     badge = {"master": "👑 Master", "ic": "🔑 IC", "viewer": "👁 Viewer"}.get(role, role)
+
+    # Reply keyboard — quick-access buttons at bottom of screen
+    if role in ("ic", "master"):
+        keyboard = [
+            ["/inventory", "/whohas"],
+            ["/training", "/attendance"],
+            ["/required", "/delegate"],
+            ["/update", "/clear"],
+        ]
+    else:
+        keyboard = [["/inventory", "/whohas"]]
+
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
     await update.message.reply_text(
         f"👋 *smuHBLogs* — {badge}\n\n"
         "📦 *Anyone:*\n"
@@ -179,6 +196,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/handover @username`\n"
         "`/listic` — view who has access\n",
         parse_mode="Markdown",
+        reply_markup=reply_markup,
     )
 
 
@@ -609,32 +627,56 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     mode = context.args[0].lower()
+    if mode not in ("training", "inventory", "all"):
+        await update.message.reply_text(
+            "❌ Unknown option. Use: `training`, `inventory`, or `all`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Inline confirmation buttons
+    keyboard = [[
+        InlineKeyboardButton("✅ Confirm", callback_data=f"clear_confirm_{mode}"),
+        InlineKeyboardButton("❌ Cancel",  callback_data="clear_cancel"),
+    ]]
+    labels = {
+        "training":  "cancel the current training",
+        "inventory": "wipe all inventory holdings",
+        "all":       "do a full reset (inventory + training)",
+    }
+    await update.message.reply_text(
+        f"⚠️ Are you sure you want to *{labels[mode]}*?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def callback_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "clear_cancel":
+        await query.edit_message_text("❌ Cancelled.")
+        return
+
+    mode = query.data.replace("clear_confirm_", "")
 
     if mode == "training":
         cleared = db.clear_active_training()
-        await update.message.reply_text(
-            "🗑️ Current training cleared."
-            if cleared else
-            "❌ No active training to clear."
+        await query.edit_message_text(
+            "🗑️ Current training cleared." if cleared else "❌ No active training to clear."
         )
-
     elif mode == "inventory":
         db.clear_inventory()
-        await update.message.reply_text("🗑️ Inventory cleared. All holdings reset.")
-
+        await query.edit_message_text("🗑️ Inventory cleared. All holdings reset.")
     elif mode == "all":
         db.clear_inventory()
         db.clear_active_training()
-        await update.message.reply_text(
+        await query.edit_message_text(
             "🗑️ *Full reset complete.*\n\n"
             "• Inventory cleared\n"
             "• Training cleared\n"
             "• IC access *unchanged* — use `/handover` to transfer IC role",
-            parse_mode="Markdown",
-        )
-    else:
-        await update.message.reply_text(
-            "❌ Unknown option. Use: `training`, `inventory`, or `all`",
             parse_mode="Markdown",
         )
 
@@ -755,6 +797,7 @@ def main():
     app.add_handler(CommandHandler("delegate",    cmd_delegate))
 
     app.add_handler(CommandHandler("clear",       cmd_clear))
+    app.add_handler(CallbackQueryHandler(callback_clear, pattern="^clear_"))
     app.add_handler(CommandHandler("listic",      cmd_listic))
     app.add_handler(CommandHandler("handover",    cmd_handover))
     app.add_handler(CommandHandler("removeic",    cmd_removeic))
