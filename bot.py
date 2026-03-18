@@ -334,7 +334,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👤 /whohas [name] — what someone is holding",
             "✅ /acceptic — accept a pending IC handover",
         ]
-        keyboard = [["/inventory", "/whohas"]]
+        keyboard = [["/attendance", "/inventory"], ["/update", "/start"]]
 
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=reply_markup)
@@ -1507,6 +1507,14 @@ PERSON-FIRST — person then item(s):
   "ruhan - balls x3"              → ruhan: balls(3)
   "rena bibs tennis balls"        → rena: bibs(1), tennis balls(1)  [space-separated distinct items]
   "rena - bibs, tennis balls"     → rena: bibs(1), tennis balls(1)  [comma-separated items after dash]
+  "rena has 4 balls"              → rena: balls(4)  ["has" is a filler word, ignore it]
+  "rena has balls"                → rena: balls(1)
+  "rena 4 balls"                  → rena: balls(4)  [number before item = quantity]
+
+MULTIPLE ENTRIES comma-separated on one line (each entry is person + optional qty + item):
+  "rena 4 balls, ella bibs"       → rena: balls(4), ella: bibs(1)
+  "rena has 4 balls, ella bibs"   → rena: balls(4), ella: bibs(1)
+  "rena balls, ella 2 bibs"       → rena: balls(1), ella: bibs(2)
 
 ITEM-FIRST — item then people (separated by " - " or nothing):
   "balls x11 - michelle, saan, denise, sera, ruhan"
@@ -1521,12 +1529,14 @@ ITEM-FIRST — item then people (separated by " - " or nothing):
 
 Rules:
 - Lowercase ALL names and items in output
-- "x N" or "xN" = quantity for that item (ignore as a total, don't divide among people)
+- Ignore filler words like "has", "have", "holds", "with", "got" between name and item/quantity
+- "x N" or "xN" or a plain number before the item = quantity for that item
 - "(N)" immediately after a name = that specific person's quantity
 - "/" between items = separate items, same holder(s)
 - If no quantity given, use 1
 - Split multi-item, multi-person entries into individual objects
 - Total quantities like "x10" on an item-first line are context only; assign per-person qty from "(N)" annotations, else 1
+- For comma-separated lines, decide per entry whether it's person-first or item-first based on whether the first token is a known item word
 - In person-first format with no dash, everything after the name (and optional qty) is items — split them into separate items if they are clearly distinct equipment words (e.g. "bibs tennis balls" → bibs + tennis balls, NOT "bibs tennis balls" as one item)
 - Fix obvious typos in item names (e.g. "tenni s balls" → "tennis balls", "bib s" → "bibs")
 - If you cannot parse anything, return []
@@ -1590,8 +1600,13 @@ def _call_groq(text: str) -> list | None:
     raw   = response.choices[0].message.content.strip()
     match = re.search(r'\[.*\]', raw, re.DOTALL)
     if not match:
+        logger.warning("Groq returned no JSON array: %s", raw[:200])
         return None
-    return json.loads(match.group())
+    try:
+        return json.loads(match.group())
+    except json.JSONDecodeError as e:
+        logger.warning("Groq JSON decode error: %s | raw: %s", e, raw[:200])
+        return None
 
 
 def _apply_holdings(entries: list) -> dict[str, list[str]]:
