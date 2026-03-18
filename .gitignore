@@ -1,6 +1,10 @@
 # Environment
 .env
 
+# Google service account credentials
+service_account.json
+*.json
+
 # Database
 *.db
 

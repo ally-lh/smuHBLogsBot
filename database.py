@@ -67,6 +67,13 @@ def init_db(master_id: int) -> None:
             created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    # Add reminder_chat_id column if it doesn't exist yet (migration)
+    try:
+        conn.execute("ALTER TABLE training ADD COLUMN reminder_chat_id INTEGER")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
+
     # Seed master — idempotent, safe to re-run
     conn.execute(
         "INSERT OR IGNORE INTO auth (user_id, role) VALUES (?, 'master')",
@@ -292,16 +299,26 @@ def get_active_training() -> Optional[sqlite3.Row]:
     return row
 
 
-def create_training(date: str, venue: str, report_time: str) -> int:
+def create_training(date: str, venue: str, report_time: str, reminder_chat_id: int = None) -> int:
     conn = get_conn()
     cur = conn.execute(
-        "INSERT INTO training (date, venue, report_time) VALUES (?, ?, ?)",
-        (date, venue.upper(), report_time)
+        "INSERT INTO training (date, venue, report_time, reminder_chat_id) VALUES (?, ?, ?, ?)",
+        (date, venue.upper(), report_time, reminder_chat_id)
     )
     training_id = cur.lastrowid
     conn.commit()
     conn.close()
     return training_id
+
+
+def set_training_reminder_chat(training_id: int, chat_id: int) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE training SET reminder_chat_id = ? WHERE id = ?",
+        (chat_id, training_id)
+    )
+    conn.commit()
+    conn.close()
 
 
 def set_required_items(training_id: int, items: list[tuple[str, int]]) -> None:

@@ -23,6 +23,7 @@ IC-only:
   /delegate                             ← generate delegation plan + copy-paste message
   /clear training|inventory|all
   /handover @username
+  /reminderchat                         ← redirect training reminders to current chat
   /listic
 
 Master-only:
@@ -34,7 +35,9 @@ import re
 import json
 import time
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from typing import Optional
+from zoneinfo import ZoneInfo
 from collections import defaultdict, deque
 from dotenv import load_dotenv
 load_dotenv()
@@ -56,9 +59,24 @@ logger = logging.getLogger(__name__)
 MASTER_ID    = int(os.getenv("MASTER_ID", "605114234"))
 BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+SHEET_ID     = os.getenv("SHEET_ID", "")
+SHEET_NAME   = os.getenv("SHEET_NAME", "Sheet1")
+SHEET_CREDS  = os.getenv("SHEET_CREDS", "service_account.json")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set.")
+
+# Google Sheets integration (optional — only active when SHEET_ID is set)
+_sheets_enabled = bool(SHEET_ID and os.path.exists(SHEET_CREDS))
+if _sheets_enabled:
+    import sheets as _sheets
+    logger.info("Google Sheets integration enabled (sheet: %s / %s)", SHEET_ID, SHEET_NAME)
+else:
+    _sheets = None  # type: ignore
+
+# Polling state — tracks the last seen attendance column so we can diff on changes
+_last_sheet_hash: Optional[str] = None   # None = not yet initialised
+_last_sheet_data: dict = {}
 
 from groq import Groq
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -654,18 +672,29 @@ async def cmd_training(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
         return
-    date, venue = context.args[0], context.args[1]
-    time        = " ".join(context.args[2:])
-    tid         = db.create_training(date, venue, time)
+    date_str, venue = context.args[0], context.args[1]
+    time_str        = " ".join(context.args[2:])
+    chat_id         = update.effective_chat.id
+    tid             = db.create_training(date_str, venue, time_str, reminder_chat_id=chat_id)
+
+    n = _schedule_training_reminders(context.application, tid, date_str, chat_id)
+    reminder_note = (
+        "\n\n🔔 *Reminder set* — I'll ping you the day before to check inventory & requirements."
+        if n > 0 else
+        "\n\n⚠️ No reminder scheduled (training may be tomorrow or already past)."
+    )
+
     await update.message.reply_text(
         f"📅 *Training created (#{tid})*\n"
-        f"• Date: {date}\n"
+        f"• Date: {date_str}\n"
         f"• Venue: {venue.upper()}\n"
-        f"• Time: {time}\n\n"
+        f"• Time: {time_str}\n\n"
         f"*Next steps:*\n"
         f"1. Reply to the attendance message with `/attendance`\n"
         f"2. Set what's needed: `/required 10 balls, bibs, ...`\n"
-        f"3. Generate plan: `/delegate`",
+        f"3. Generate plan: `/delegate`"
+        f"{reminder_note}\n\n"
+        f"_Use /reminderchat in a group to redirect reminders there instead._",
         parse_mode="Markdown",
     )
 
@@ -680,18 +709,179 @@ async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Priority: reply-to message > inline args
+    # Priority: reply-to message > inline args > generate from sheet
     if update.message.reply_to_message:
         text = update.message.reply_to_message.text or ""
     elif context.args:
         text = " ".join(context.args)
     else:
-        await update.message.reply_text(
-            "Reply to the attendance message with `/attendance`\n\n"
-            "Or type names directly:\n"
-            "`/attendance Ally, Eunice, Ruhan (late 9pm)`",
-            parse_mode="Markdown",
-        )
+        # Generate the attendance message from Google Sheet
+        if not _sheets_enabled:
+            await update.message.reply_text(
+                "Reply to the attendance message with `/attendance`\n\n"
+                "Or type names directly:\n"
+                "`/attendance Ally, Eunice, Ruhan (late 9pm)`\n\n"
+                "_Tip: set up Google Sheets integration to auto-generate this._",
+                parse_mode="Markdown",
+            )
+            return
+
+        try:
+            training_date = datetime.strptime(training["date"], "%d/%m/%Y").date()
+        except ValueError:
+            await update.message.reply_text("❌ Couldn't parse training date.")
+            return
+
+        try:
+            sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, training_date)
+        except Exception as e:
+            logger.error("Sheet fetch error in /attendance: %s", e)
+            await update.message.reply_text(f"❌ Couldn't read sheet: {e}")
+            return
+
+        if sheet_data is None:
+            await update.message.reply_text(
+                f"❌ No column for {training['date']} found in the sheet."
+            )
+            return
+
+        # Build list of people coming, appending late details where applicable
+        # Also build DB-compatible attendees list at the same time
+        coming   = []
+        db_attendees = []
+        for name, parsed in sheet_data["attendance"].items():
+            s = parsed.get("status")
+            if s == "present":
+                coming.append(name)
+                db_attendees.append((name.lower().strip(), "present", None))
+            elif s == "late":
+                parts = ["late"]
+                if parsed.get("reason"):
+                    parts.append(parsed["reason"])
+                if parsed.get("eta"):
+                    parts.append(parsed["eta"])
+                coming.append(f"{name} ({', '.join(parts)})")
+                db_attendees.append((name.lower().strip(), "late", parsed.get("eta")))
+
+        if not coming:
+            await update.message.reply_text("❌ Nobody is marked as coming in the sheet yet.")
+            return
+
+        # Save attendance to DB so delegation can use it
+        db.set_attendance(training["id"], db_attendees)
+
+        # Format: Attendance DD/MM/YY  (2-digit year)
+        date_str = training_date.strftime("%d/%m/%y")
+        venue    = training.get("venue") or sheet_data.get("venue") or "TBC"
+        time_str = training.get("report_time") or sheet_data.get("time") or "TBC"
+
+        msg_lines = [f"Attendance {date_str}", ""]
+        msg_lines += coming
+        msg_lines += ["", f"Location: {venue}", f"Time: {time_str}"]
+
+        await update.message.reply_text("\n".join(msg_lines))
+
+        # Skip equipment delegation for VR trainings
+        if venue.upper().startswith("VR"):
+            return
+
+        required = db.get_required_items(training["id"])
+        if not required:
+            await update.message.reply_text(
+                "ℹ️ *Attendance saved.* No required items set yet.\n"
+                "Run `/required 10 balls, bibs, ...` to set them, then `/delegate` for the equipment plan.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Auto-run delegation ─────────────────────────────────────
+        attending = {name.lower().strip() for name, parsed in sheet_data["attendance"].items()
+                     if parsed.get("status") in ("present", "late")}
+
+        inv_map: dict[str, list[tuple[str, int]]] = {}
+        for r in db.get_full_inventory():
+            inv_map.setdefault(r["item"], []).append((r["holder"], r["quantity"]))
+
+        bringing: list[tuple[str, str, int]] = []
+        passes:   list[tuple[str, str, str, int]] = []
+        missing:  list[tuple[str, int]] = []
+
+        for req in required:
+            req_item = req["item"]
+            req_qty  = req["quantity"]
+            holders  = inv_map.get(req_item, [])
+            if not holders:
+                missing.append((req_item, req_qty))
+                continue
+            attending_holders = [(h, q) for h, q in holders if h in attending]
+            absent_holders    = [(h, q) for h, q in holders if h not in attending]
+            covered           = sum(q for _, q in attending_holders)
+            for holder, qty in attending_holders:
+                bringing.append((holder, req_item, qty))
+            remaining = req_qty - covered
+            if remaining > 0:
+                for holder, qty in absent_holders:
+                    if remaining <= 0:
+                        break
+                    take     = min(qty, remaining)
+                    receiver = next(
+                        (b[0] for b in bringing if b[1] == req_item),
+                        next(iter(sorted(attending)), None),
+                    )
+                    if receiver:
+                        passes.append((holder, receiver, req_item, take))
+                        remaining -= take
+                if remaining > 0:
+                    missing.append((req_item, remaining))
+
+        by_holder: dict[str, list[str]] = {}
+        for holder, item, qty in bringing:
+            by_holder.setdefault(holder.title(), []).append(fmt(item, qty))
+
+        plan_lines = [
+            "📋 *Equipment Plan*",
+            f"📅 {training['date']} · {venue} · {time_str}\n",
+        ]
+        if by_holder:
+            plan_lines.append("🟢 *Bringing directly:*")
+            for name, items in sorted(by_holder.items()):
+                plan_lines.append(f"• {name} → {', '.join(items)}")
+            plan_lines.append("")
+        if passes:
+            plan_lines.append("🔄 *Passes needed:*")
+            for from_h, to_h, item, qty in passes:
+                plan_lines.append(f"• {from_h.title()} → pass {fmt(item, qty)} to {to_h.title()}")
+            plan_lines.append("")
+        if missing:
+            plan_lines.append("❓ *Not found / shortfall:*")
+            for item, qty in missing:
+                plan_lines.append(f"• {fmt(item, qty)} — check locker")
+            plan_lines.append("")
+        if not passes and not missing:
+            plan_lines.append("✅ All items covered, no passes needed!")
+
+        plan_lines += [
+            "─────────────────────",
+            "📤 *Copy-paste for group:*\n",
+        ]
+        group = [
+            f"Hey team! Equipment plan for {training['date']} at {venue} ({time_str}):\n"
+        ]
+        if by_holder:
+            group.append("Please bring:")
+            for name, items in sorted(by_holder.items()):
+                group.append(f"• {name} — {', '.join(items)}")
+        if passes:
+            group.append("\nPasses needed before training:")
+            for from_h, to_h, item, qty in passes:
+                group.append(f"• {from_h.title()}, please pass {fmt(item, qty)} to {to_h.title()} ✅")
+        if missing:
+            group.append("\nStill checking:")
+            for item, qty in missing:
+                group.append(f"• {fmt(item, qty)} — will confirm shortly")
+
+        plan_lines += group
+        await update.message.reply_text("\n".join(plan_lines), parse_mode="Markdown")
         return
 
     attendees = parse_attendance_text(text)
@@ -954,6 +1144,31 @@ async def callback_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• IC access *unchanged* — use `/handover` to transfer IC role",
             parse_mode="Markdown",
         )
+
+
+@ic_only
+async def cmd_reminderchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Set the current chat as the destination for training reminders.
+    Run this from a group chat so reminders go there instead of the IC's DM.
+    """
+    training = db.get_active_training()
+    if not training:
+        await update.message.reply_text(
+            "❌ No active training. Create one with `/training` first.",
+            parse_mode="Markdown",
+        )
+        return
+
+    chat_id = update.effective_chat.id
+    db.set_training_reminder_chat(training["id"], chat_id)
+
+    n = _schedule_training_reminders(context.application, training["id"], training["date"], chat_id)
+    await update.message.reply_text(
+        f"🔔 *Reminders redirected to this chat!*\n"
+        f"{n} reminder(s) rescheduled for training on {training['date']}.",
+        parse_mode="Markdown",
+    )
 
 
 @ic_only
@@ -1254,6 +1469,260 @@ async def handle_text_holdings(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ──────────────────────────────────────────────────────────────
+# GOOGLE SHEETS — ATTENDANCE
+# ──────────────────────────────────────────────────────────────
+
+@ic_only
+async def cmd_sheetattendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pull today's attendance directly from the Google Sheet."""
+    if not _sheets_enabled:
+        await update.message.reply_text(
+            "❌ Google Sheets not configured.\n"
+            "Set `SHEET_ID`, `SHEET_NAME`, and `SHEET_CREDS` in your `.env` file.",
+            parse_mode="Markdown",
+        )
+        return
+
+    target = date.today()
+    # Allow optional date arg: /sheetattendance DD/MM/YYYY
+    if context.args:
+        try:
+            target = datetime.strptime(context.args[0], "%d/%m/%Y").date()
+        except ValueError:
+            await update.message.reply_text("❌ Date format: `DD/MM/YYYY`", parse_mode="Markdown")
+            return
+
+    await update.message.reply_text("⏳ Fetching sheet…")
+    try:
+        result = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, target)
+    except Exception as e:
+        logger.error("Sheet fetch error: %s", e)
+        await update.message.reply_text(f"❌ Couldn't read sheet: {e}")
+        return
+
+    if result is None:
+        await update.message.reply_text(
+            f"❌ No column found for {target.strftime('%-d %b %Y')} in the sheet.\n"
+            "Check that the date exists in row 3."
+        )
+        return
+
+    attendance = result["attendance"]
+    if not attendance:
+        await update.message.reply_text("❌ No names found in the sheet.")
+        return
+
+    # Group by status
+    present, late, absent, tbc, no_resp, other = [], [], [], [], [], []
+    for name, parsed in attendance.items():
+        s = parsed.get("status")
+        if s == "present":
+            present.append(name)
+        elif s == "late":
+            late.append((name, parsed))
+        elif s == "absent":
+            absent.append((name, parsed))
+        elif s == "tbc":
+            tbc.append((name, parsed))
+        elif s == "no response":
+            no_resp.append(name)
+        else:
+            other.append((name, parsed))
+
+    venue_str = f" · {result['venue']}" if result["venue"] else ""
+    time_str  = f" · {result['time']}"  if result["time"]  else ""
+    lines = [
+        f"📊 *Sheet attendance — {target.strftime('%-d %b %Y')}{venue_str}{time_str}*\n"
+    ]
+
+    if present:
+        lines.append(f"✅ *Coming ({len(present)}):* {', '.join(present)}")
+    if late:
+        lines.append(f"\n⏰ *Late ({len(late)}):*")
+        for name, p in late:
+            detail_parts = []
+            if p.get("reason"):
+                detail_parts.append(p["reason"])
+            if p.get("eta"):
+                detail_parts.append(f"ETA {p['eta']}")
+            detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+            lines.append(f"  • {name}{detail}")
+    if absent:
+        lines.append(f"\n❌ *Absent ({len(absent)}):*")
+        for name, p in absent:
+            reason = f" — {p['reason']}" if p.get("reason") else ""
+            lines.append(f"  • {name}{reason}")
+    if tbc:
+        lines.append(f"\n❓ *TBC ({len(tbc)}):*")
+        for name, p in tbc:
+            reason = f" ({p['reason']})" if p.get("reason") else ""
+            lines.append(f"  • {name}{reason}")
+    if no_resp:
+        lines.append(f"\n— *No response ({len(no_resp)}):* {', '.join(no_resp)}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def _sheet_poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Background job: poll the Google Sheet every few minutes.
+    When attendance changes for today's training, send a diff to the reminder chat.
+    """
+    global _last_sheet_hash, _last_sheet_data
+
+    if not _sheets_enabled:
+        return
+
+    training = db.get_active_training()
+    if not training:
+        return
+
+    try:
+        training_date = datetime.strptime(training["date"], "%d/%m/%Y").date()
+    except ValueError:
+        return
+
+    if training_date != date.today():
+        return
+
+    chat_id = training.get("reminder_chat_id")
+    if not chat_id:
+        return
+
+    try:
+        result = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, training_date)
+    except Exception as e:
+        logger.warning("Sheet poll failed: %s", e)
+        return
+
+    if result is None:
+        return
+
+    attendance = result["attendance"]
+
+    # Build a stable hash from sorted name:raw_value pairs
+    import hashlib
+    col_str  = "|".join(f"{k}:{v}" for k, v in sorted(attendance.items()))
+    new_hash = hashlib.md5(col_str.encode()).hexdigest()
+
+    if _last_sheet_hash is None:
+        # First poll — just seed state, don't notify
+        _last_sheet_hash = new_hash
+        _last_sheet_data = dict(attendance)
+        return
+
+    if new_hash == _last_sheet_hash:
+        return  # Nothing changed
+
+    # Compute diff
+    all_names = set(_last_sheet_data) | set(attendance)
+    changes = []
+    for name in sorted(all_names):
+        old = _last_sheet_data.get(name)
+        new = attendance.get(name)
+        if old != new:
+            changes.append((name, old, new))
+
+    _last_sheet_hash = new_hash
+    _last_sheet_data = dict(attendance)
+
+    if not changes:
+        return
+
+    lines = ["📊 *Sheet update*\n"]
+    for name, old, new in changes:
+        old_str = _sheets.format_cell_status(old) if old else "—"
+        new_str = _sheets.format_cell_status(new) if new else "—"
+        lines.append(f"• *{name}*: {old_str} → {new_str}")
+
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.warning("Failed to send sheet update (chat_id=%s): %s", chat_id, e)
+
+
+# ──────────────────────────────────────────────────────────────
+# SCHEDULED REMINDERS
+# ──────────────────────────────────────────────────────────────
+
+SGT = ZoneInfo("Asia/Singapore")
+
+_REMINDER_1D = (
+    "⚠️ *Training tomorrow!*\n\n"
+    "Prep checklist:\n"
+    "• Check who has what equipment → /inventory\n"
+    "• Ask coaches what's needed, then set it → `/required 10 balls, bibs, ...`\n"
+    "• Set attendance → /attendance\n"
+    "• Run /delegate to see who brings/passes what"
+)
+
+
+async def _reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job = context.job
+    try:
+        await context.bot.send_message(
+            chat_id=job.chat_id,
+            text=job.data["message"],
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.warning("Failed to send reminder (chat_id=%s): %s", job.chat_id, e)
+
+
+def _schedule_training_reminders(app, training_id: int, date_str: str, chat_id: int) -> int:
+    """
+    Schedule up to 3 reminder jobs for a training session.
+    Returns the number of jobs actually scheduled (skips any that are already past).
+    date_str format: DD/MM/YYYY
+    """
+    try:
+        training_date = datetime.strptime(date_str, "%d/%m/%Y").date()
+    except ValueError:
+        logger.warning("Could not parse training date for reminders: %s", date_str)
+        return 0
+
+    now = datetime.now(SGT)
+    scheduled = 0
+
+    reminders = [
+        # (days before training, hour SGT, minute, message)
+        (1, 9, 0, _REMINDER_1D),
+    ]
+
+    for days_before, hour, minute, msg in reminders:
+        remind_dt = datetime(
+            training_date.year, training_date.month, training_date.day,
+            hour, minute, 0,
+            tzinfo=SGT,
+        ) - timedelta(days=days_before)
+
+        if remind_dt <= now:
+            continue  # Already past, skip
+
+        job_name = f"training_{training_id}_d{days_before}"
+        # Remove any existing job with this name before scheduling
+        existing = app.job_queue.get_jobs_by_name(job_name)
+        for j in existing:
+            j.schedule_removal()
+
+        app.job_queue.run_once(
+            _reminder_job,
+            when=remind_dt,
+            chat_id=chat_id,
+            data={"message": msg, "training_id": training_id},
+            name=job_name,
+        )
+        logger.info("Reminder scheduled: %s at %s for chat %s", job_name, remind_dt, chat_id)
+        scheduled += 1
+
+    return scheduled
+
+
+# ──────────────────────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────────────────────
 
@@ -1262,6 +1731,15 @@ def main():
     logger.info("Database initialised. Master ID: %d", MASTER_ID)
 
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Reschedule reminders for any active training that survived a restart
+    training = db.get_active_training()
+    if training and training["reminder_chat_id"]:
+        n = _schedule_training_reminders(
+            app, training["id"], training["date"], training["reminder_chat_id"]
+        )
+        if n:
+            logger.info("Rescheduled %d reminder(s) for training #%d on restart.", n, training["id"])
 
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("help",        cmd_help))
@@ -1280,12 +1758,19 @@ def main():
     app.add_handler(CommandHandler("required",    cmd_required))
     app.add_handler(CommandHandler("delegate",    cmd_delegate))
 
-    app.add_handler(CommandHandler("clear",       cmd_clear))
+    app.add_handler(CommandHandler("clear",             cmd_clear))
     app.add_handler(CallbackQueryHandler(callback_clear, pattern="^clear_"))
-    app.add_handler(CommandHandler("listic",      cmd_listic))
-    app.add_handler(CommandHandler("handover",    cmd_handover))
-    app.add_handler(CommandHandler("removeic",    cmd_removeic))
+    app.add_handler(CommandHandler("reminderchat",      cmd_reminderchat))
+    app.add_handler(CommandHandler("listic",            cmd_listic))
+    app.add_handler(CommandHandler("handover",          cmd_handover))
+    app.add_handler(CommandHandler("removeic",          cmd_removeic))
+    app.add_handler(CommandHandler("sheetattendance",   cmd_sheetattendance))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_holdings))
+
+    # Poll Google Sheet every 5 minutes on training days
+    if _sheets_enabled:
+        app.job_queue.run_repeating(_sheet_poll_job, interval=300, first=10)
+        logger.info("Sheet polling job scheduled (every 5 min).")
 
     logger.info("smuHBLogs is running.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
