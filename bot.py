@@ -31,11 +31,12 @@ Master-only:
 
 import os
 import re
+import json
 import logging
 from dotenv import load_dotenv
 load_dotenv()
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 import database as db
 
@@ -49,11 +50,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MASTER_ID = int(os.getenv("MASTER_ID", "605114234"))
-BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
+MASTER_ID    = int(os.getenv("MASTER_ID", "605114234"))
+BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set.")
+
+from groq import Groq
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -772,6 +777,80 @@ async def cmd_removeic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ──────────────────────────────────────────────────────────────
+# AI — FREE-TEXT HOLDINGS PARSER
+# ──────────────────────────────────────────────────────────────
+
+async def handle_text_holdings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    IC/master can send a free-text message like:
+      ella - balls x4, bibs
+      ruhan - balls x3
+      ally - cones
+    Groq parses it into structured holdings and sets them in the DB.
+    """
+    if not db.is_ic_or_master(update.effective_user.id):
+        return
+    if not groq_client:
+        await update.message.reply_text("❌ GROQ_API_KEY not configured.")
+        return
+
+    text = update.message.text.strip()
+
+    prompt = f"""You are a parser for a handball team logistics bot.
+Extract holdings from this message. Each entry is a person and what equipment they have.
+Return ONLY a JSON array like:
+[{{"name": "ella", "item": "balls", "quantity": 4}}, {{"name": "ella", "item": "bibs", "quantity": 1}}]
+
+Rules:
+- If no quantity is given, use 1
+- Lowercase all names and items
+- Split multi-item entries into separate objects
+- If you cannot parse anything, return []
+
+Message:
+{text}"""
+
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        raw = response.choices[0].message.content.strip()
+        # Extract JSON array from response
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not match:
+            await update.message.reply_text("❌ Couldn't parse that. Try: `name - item x qty, item`", parse_mode="Markdown")
+            return
+        entries = json.loads(match.group())
+    except Exception as e:
+        logger.error("Groq parse error: %s", e)
+        await update.message.reply_text("❌ AI parsing failed. Try again or use `/update`.", parse_mode="Markdown")
+        return
+
+    if not entries:
+        await update.message.reply_text("❌ Couldn't find any holdings in that message.")
+        return
+
+    for entry in entries:
+        db.set_holding(entry["name"], entry["item"], entry.get("quantity", 1))
+
+    # Group by holder for display
+    by_holder: dict[str, list[str]] = {}
+    for entry in entries:
+        by_holder.setdefault(entry["name"].title(), []).append(
+            fmt(entry["item"], entry.get("quantity", 1))
+        )
+
+    lines = ["✅ *Holdings updated:*\n"]
+    for name, items in sorted(by_holder.items()):
+        lines.append(f"*{name}*")
+        for item in items:
+            lines.append(f"  • {item}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ──────────────────────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────────────────────
 
@@ -801,6 +880,7 @@ def main():
     app.add_handler(CommandHandler("listic",      cmd_listic))
     app.add_handler(CommandHandler("handover",    cmd_handover))
     app.add_handler(CommandHandler("removeic",    cmd_removeic))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_holdings))
 
     logger.info("smuHBLogs is running.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
