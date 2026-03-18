@@ -475,6 +475,69 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+def _parse_holdings_manual(body: str) -> tuple[list[tuple[str, str, int]], list[str]]:
+    """
+    Loose line-by-line parser. Returns ([(name, item, qty), ...], [error_strings]).
+
+    Item-first  (has ' - '):  "balls x 11 - michelle, saan"
+                               "cones/marker discs - seraphina"
+                               "bibs/tennis balls - kai"
+    Person-first (no ' - '): "ella 4 balls, rena bibs"
+    """
+    results, errors = [], []
+
+    for raw_line in body.splitlines():
+        line = raw_line.strip().rstrip(",")
+        if not line:
+            continue
+
+        if " - " in line:
+            item_part, _, people_part = line.partition(" - ")
+
+            # Multiple items separated by "/"
+            raw_items = [i.strip() for i in item_part.split("/") if i.strip()]
+            clean_items = []
+            for it in raw_items:
+                it = re.sub(r"\s*x\s*\d+\s*$", "", it, flags=re.IGNORECASE).strip()  # strip "x 11" suffix
+                it = re.sub(r"^\d+\s+", "", it).strip()                               # strip leading qty
+                if it:
+                    clean_items.append(it.lower())
+
+            # People: comma-separated, optional "(N)" per-person qty
+            people = []
+            for p in people_part.split(","):
+                p = p.strip()
+                if not p:
+                    continue
+                m = re.match(r"^(.+?)\s*\((\d+)\)\s*$", p)
+                if m:
+                    people.append((m.group(1).strip().lower(), int(m.group(2))))
+                else:
+                    people.append((p.lower(), 1))
+
+            if not clean_items or not people:
+                errors.append(f"• Couldn't parse: `{line}`")
+                continue
+
+            for person, qty in people:
+                for item in clean_items:
+                    results.append((person, item, qty))
+
+        else:
+            # Person-first, comma-separated segments on the same line
+            for seg in line.split(","):
+                seg = seg.strip()
+                if not seg:
+                    continue
+                name, qty, item = parse_name_qty_item(seg.split())
+                if name and item:
+                    results.append((name.lower(), item.lower(), qty))
+                else:
+                    errors.append(f"• Couldn't parse: `{seg}`")
+
+    return results, errors
+
+
 @ic_only
 async def cmd_update(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     """
@@ -517,18 +580,9 @@ async def cmd_update(update: Update, _context: ContextTypes.DEFAULT_TYPE):
             logger.error("Groq parse error in /update: %s", e)
             # Fall through to manual parser
 
-    # Manual fallback: person-first comma-separated
-    segments = [s.strip() for s in body.split(",") if s.strip()]
-    results, errors = [], []
-    for seg in segments:
-        name, qty, item = parse_name_qty_item(seg.split())
-        if not name or not item:
-            errors.append(f"• Couldn't parse: `{seg}`")
-            continue
-        db.set_holding(name, item, qty)
-        results.append(f"• {name.title()} — {fmt(item, qty)}")
-
-    if not results and errors:
+    # Manual fallback: loose line-by-line parser (item-first + person-first)
+    entries, errors = _parse_holdings_manual(body)
+    if not entries:
         await update.message.reply_text(
             "❌ Couldn't parse that format.\n"
             "Try: `ella 4 balls, rena bibs` or `balls x11 - michelle, saan`",
@@ -536,7 +590,12 @@ async def cmd_update(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    lines = ["✅ *Inventory updated:*\n"] + results
+    by_holder = _apply_holdings([{"name": n, "item": i, "quantity": q} for n, i, q in entries])
+    lines = ["✅ *Inventory updated:*\n"]
+    for name, items in sorted(by_holder.items()):
+        lines.append(f"*{name}*")
+        for item in items:
+            lines.append(f"  • {item}")
     if errors:
         lines += ["\n⚠️ *Couldn't parse:*"] + errors
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
