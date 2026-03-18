@@ -310,10 +310,10 @@ def get_active_training() -> Optional[sqlite3.Row]:
 
 
 def get_training_by_date(date_str: str) -> Optional[sqlite3.Row]:
-    """Return the training record for the given DD/MM/YYYY date, or None."""
+    """Return the scheduled training record for the given DD/MM/YYYY date, or None."""
     conn = get_conn()
     row = conn.execute(
-        "SELECT * FROM training WHERE date = ? ORDER BY rowid DESC LIMIT 1",
+        "SELECT * FROM training WHERE date = ? AND status = 'scheduled' ORDER BY rowid DESC LIMIT 1",
         (date_str,)
     ).fetchone()
     conn.close()

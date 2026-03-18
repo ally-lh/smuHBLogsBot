@@ -649,10 +649,12 @@ async def cmd_update(update: Update, _context: ContextTypes.DEFAULT_TYPE):
 
     if not body:
         await update.message.reply_text(
-            "Send holdings in any format after `/update`:\n\n"
-            "*Person-first:* `ella 4 balls, rena bibs`\n"
-            "*Item-first:* `balls x11 - michelle, saan`\n"
-            "*Multiline* works too — just put each item on its own line.",
+            "Who has what? Reply with the holdings below 👇\n\n"
+            "Format options:\n"
+            "• `rena bibs, ella 4 balls` — person-first, comma = new person\n"
+            "• `rena - bibs, tennis balls` — person-first, comma = new item\n"
+            "• `balls x11 - michelle, saan` — item-first\n"
+            "• Multiline works too, one entry per line",
             parse_mode="Markdown",
         )
         return
@@ -1328,7 +1330,6 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Inline confirmation buttons
     keyboard = [[
         InlineKeyboardButton("✅ Confirm", callback_data=f"clear_confirm_{mode}"),
         InlineKeyboardButton("❌ Cancel",  callback_data="clear_cancel"),
@@ -1503,6 +1504,8 @@ The message may use EITHER format, or a mix:
 PERSON-FIRST — person then item(s):
   "ella - balls x4, bibs"         → ella: balls(4), bibs(1)
   "ruhan - balls x3"              → ruhan: balls(3)
+  "rena bibs tennis balls"        → rena: bibs(1), tennis balls(1)  [space-separated distinct items]
+  "rena - bibs, tennis balls"     → rena: bibs(1), tennis balls(1)  [comma-separated items after dash]
 
 ITEM-FIRST — item then people (separated by " - " or nothing):
   "balls x11 - michelle, saan, denise, sera, ruhan"
@@ -1523,6 +1526,8 @@ Rules:
 - If no quantity given, use 1
 - Split multi-item, multi-person entries into individual objects
 - Total quantities like "x10" on an item-first line are context only; assign per-person qty from "(N)" annotations, else 1
+- In person-first format with no dash, everything after the name (and optional qty) is items — split them into separate items if they are clearly distinct equipment words (e.g. "bibs tennis balls" → bibs + tennis balls, NOT "bibs tennis balls" as one item)
+- Fix obvious typos in item names (e.g. "tenni s balls" → "tennis balls", "bib s" → "bibs")
 - If you cannot parse anything, return []
 
 Return ONLY a JSON array, no explanation:
