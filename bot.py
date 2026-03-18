@@ -255,7 +255,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     badge = {"master": "👑 Master", "ic": "🔑 IC", "viewer": "👁 Viewer"}.get(role, role)
     is_ic = role in ("ic", "master")
 
-    lines = [f"*smuHBLogs* — {badge}\n"]
+    lines = [f"<b>smuHBLogs</b> — {badge}\n"]
 
     if is_ic:
         training = db.get_active_training()
@@ -264,9 +264,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines += [
                 "No upcoming training set.\n",
                 "To get started:",
-                "• `/training DD/MM/YYYY venue time` — create a session",
-                "• `/attendance` — pull attendance from Google Sheets\n",
-                "📦 `/inventory` — check current equipment",
+                "• /training DD/MM/YYYY venue time — create a session",
+                "• /attendance — pick a session from Google Sheets\n",
+                "📦 /inventory — check current equipment",
             ]
             keyboard = [["/inventory", "/whohas"], ["/training", "/help"]]
         else:
@@ -274,7 +274,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             required   = db.get_required_items(training["id"])
 
             lines += [
-                f"📅 *{training['date']}* · {training['venue']} · {training['report_time']}\n",
+                f"📅 <b>{training['date']}</b> · {training['venue']} · {training['report_time']}\n",
             ]
 
             # Attendance status
@@ -292,77 +292,78 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             lines.append("")
 
-            # Single clear "what to do next"
             if not attendance:
                 lines += [
-                    "*Next step:* Set attendance",
-                    "Run `/attendance` to pick a session from Google Sheets",
+                    "<b>Next step:</b> Set attendance",
+                    "Run /attendance to pick a session from Google Sheets",
                 ]
                 keyboard = [["/attendance", "/inventory"], ["/required", "/help"]]
             elif not required:
                 lines += [
-                    "*Next step:* Set required items",
-                    "`/required 10 balls, bibs, tape bag, ...`",
+                    "<b>Next step:</b> Set required items",
+                    "/required 10 balls, bibs, tape bag, ...",
                 ]
                 keyboard = [["/required", "/delegate"], ["/inventory", "/help"]]
             else:
                 lines += [
-                    "*Ready to go!* Run `/delegate` to generate the equipment plan.",
+                    "<b>Ready to go!</b> Run /delegate to generate the equipment plan.",
                 ]
                 keyboard = [["/delegate", "/inventory"], ["/required", "/clear"], ["/help"]]
 
-        lines.append("\n`/help` — all commands")
+        lines.append("\n/help — all commands")
     else:
         lines += [
-            "📦 `/inventory` — see all equipment holdings",
-            "📦 `/inventory [item]` — who has something specific",
-            "👤 `/whohas [name]` — what someone is holding",
+            "📦 /inventory — see all equipment holdings",
+            "📦 /inventory [item] — who has something specific",
+            "👤 /whohas [name] — what someone is holding",
+            "✅ /acceptic — accept a pending IC handover",
         ]
         keyboard = [["/inventory", "/whohas"]]
 
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=reply_markup)
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=reply_markup)
 
 
 async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     role  = db.get_role(update.effective_user.id) or "viewer"
     is_ic = role in ("ic", "master")
 
-    lines = ["📖 *Commands*\n"]
+    lines = ["📖 <b>Commands</b>\n"]
     lines += [
-        "*Anyone:*",
-        "`/inventory` — view all equipment holdings",
-        "`/inventory [item]` — see who has a specific item",
-        "`/whohas [name]` — see what someone is holding",
+        "<b>Anyone:</b>",
+        "/inventory — view all equipment holdings",
+        "/inventory [item] — see who has a specific item",
+        "/whohas [name] — see what someone is holding",
+        "/acceptic — accept a pending IC handover",
     ]
 
     if is_ic:
         lines += [
             "",
-            "*Training:*",
-            "`/training [DD/MM/YYYY] [venue] [time]` — create a training session",
-            "`/attendance` — pick from upcoming sessions (via Google Sheets)",
-            "`/sheetattendance [DD/MM/YYYY]` — pull attendance from sheet for a date",
-            "`/required [items, ...]` — set equipment needed for training",
-            "`/delegate` — generate equipment delegation plan",
-            "`/reminderchat` — set this chat as the auto-reminder channel",
+            "<b>Training:</b>",
+            "/training [DD/MM/YYYY] [venue] [time] — create a training session",
+            "/attendance — pick from upcoming sessions (Google Sheets)",
+            "/sheetattendance [DD/MM/YYYY] — pull attendance for a specific date",
+            "/required [items, ...] — set equipment needed for training",
+            "/delegate — generate equipment delegation plan",
+            "/reminderchat — set this chat as the auto-reminder channel",
             "",
-            "*Inventory:*",
-            "`/setholding [name] [qty?] [item]` — assign item to someone",
-            "`/removeitem [name] [item]` — remove item from someone",
-            "`/rename [old] to [new]` — rename a holder",
-            "`/transfer [item] from [name] to [name]` — move item between holders",
-            "`/update [name] [qty?] [item], ...` — bulk post-training update",
+            "<b>Inventory:</b>",
+            "/setholding [name] [qty] [item] — assign item to someone",
+            "/removeitem [name] [item] — remove item from someone",
+            "/rename [old] to [new] — rename a holder",
+            "/transfer [item] from [name] to [name] — move item between holders",
+            "/update [name] [qty] [item], ... — bulk post-training update",
             "",
-            "*Admin:*",
-            "`/clear training|inventory|all` — wipe data",
-            "`/handover @username` — hand over IC role",
-            "`/listic` — list who has IC/master access",
+            "<b>Admin:</b>",
+            "/clear training|inventory|all — wipe data",
+            "/handover @username — hand over IC role",
+            "/listic — list who has IC/master access",
         ]
         if role == "master":
-            lines.append("`/removeic @username` — revoke IC access")
+            lines.append("/removeic @username — revoke IC access")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
