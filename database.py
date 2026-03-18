@@ -239,6 +239,38 @@ def search_inventory_by_holder(holder: str) -> list:
     return rows
 
 
+def rename_holder(old_name: str, new_name: str) -> int:
+    """
+    Rename a holder across inventory and attendance.
+    If new_name already holds some of the same items, quantities are merged.
+    Returns the number of inventory rows affected.
+    """
+    old = old_name.lower().strip()
+    new = new_name.lower().strip()
+    conn = get_conn()
+
+    rows = conn.execute(
+        "SELECT item, quantity FROM inventory WHERE holder = ?", (old,)
+    ).fetchall()
+
+    for row in rows:
+        conn.execute(
+            """INSERT INTO inventory (holder, item, quantity) VALUES (?, ?, ?)
+               ON CONFLICT(holder, item) DO UPDATE SET quantity = quantity + excluded.quantity""",
+            (new, row["item"], row["quantity"])
+        )
+    conn.execute("DELETE FROM inventory WHERE holder = ?", (old,))
+
+    # Also rename in any attendance records
+    conn.execute(
+        "UPDATE attendance SET name = ? WHERE name = ?", (new, old)
+    )
+
+    conn.commit()
+    conn.close()
+    return len(rows)
+
+
 def clear_inventory() -> None:
     conn = get_conn()
     conn.execute("DELETE FROM inventory")

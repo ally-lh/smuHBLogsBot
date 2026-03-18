@@ -34,6 +34,7 @@ import re
 import json
 import time
 import logging
+from datetime import datetime, date
 from collections import defaultdict, deque
 from dotenv import load_dotenv
 load_dotenv()
@@ -329,6 +330,7 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
             "*Inventory:*",
             "`/setholding [name] [qty?] [item]`",
             "`/removeitem [name] [item]`",
+            "`/rename [old name] to [new name]`",
             "`/transfer [item] from [name] to [name]`",
             "`/update [name] [qty?] [item], ...` — bulk update",
             "",
@@ -446,6 +448,44 @@ async def cmd_removeitem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(
             f"❌ *{holder.title()}* doesn't have *{item}* in inventory.",
+            parse_mode="Markdown",
+        )
+
+
+@ic_only
+async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /rename [old name] to [new name]  OR  /rename [old] [new]
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/rename [old name] to [new name]`\n"
+            "Example: `/rename sera to seraphina`",
+            parse_mode="Markdown",
+        )
+        return
+
+    text = " ".join(context.args)
+    m = re.match(r"^(.+?)\s+to\s+(.+)$", text, re.IGNORECASE)
+    if m:
+        old_name, new_name = m.group(1).strip(), m.group(2).strip()
+    elif len(context.args) == 2:
+        old_name, new_name = context.args[0], context.args[1]
+    else:
+        await update.message.reply_text(
+            "Usage: `/rename [old name] to [new name]`",
+            parse_mode="Markdown",
+        )
+        return
+
+    affected = db.rename_holder(old_name, new_name)
+    if affected == 0:
+        await update.message.reply_text(
+            f"❌ *{old_name.title()}* has no inventory entries.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Renamed *{old_name.title()}* → *{new_name.title()}* "
+            f"({affected} item{'s' if affected != 1 else ''} updated).",
             parse_mode="Markdown",
         )
 
@@ -1048,6 +1088,44 @@ Message:
 """
 
 
+def _parse_report_time(time_str: str) -> tuple[int, int] | None:
+    """Parse a free-text time like '7:30pm', '7pm', '19:30', '1930' → (hour, minute). Returns None on failure."""
+    s = time_str.strip().lower().replace(" ", "")
+    # 12-hour: 7:30pm, 730pm, 7pm
+    m = re.match(r'^(\d{1,2})(?::?(\d{2}))?([ap]m)$', s)
+    if m:
+        h, mi, ampm = int(m.group(1)), int(m.group(2) or 0), m.group(3)
+        if ampm == 'pm' and h != 12:
+            h += 12
+        elif ampm == 'am' and h == 12:
+            h = 0
+        return h, mi
+    # 24-hour: 19:30 or 1930
+    m = re.match(r'^(\d{2}):?(\d{2})$', s)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def _is_after_training_time() -> bool:
+    """Return True if there's a scheduled training today and we're at or past its report_time."""
+    training = db.get_active_training()
+    if not training:
+        return False
+    try:
+        training_date = datetime.strptime(training["date"], "%d/%m/%Y").date()
+    except ValueError:
+        return False
+    if training_date != date.today():
+        return False
+    parsed = _parse_report_time(training["report_time"] or "")
+    if not parsed:
+        return False
+    h, mi = parsed
+    now = datetime.now()
+    return (now.hour, now.minute) >= (h, mi)
+
+
 def _call_groq(text: str) -> list | None:
     """
     Send text to Groq and return parsed holdings list, or None on failure.
@@ -1086,10 +1164,36 @@ async def handle_text_holdings(update: Update, context: ContextTypes.DEFAULT_TYP
       ally - cones
     Groq parses it into structured holdings and sets them in the DB.
     """
-    if not db.is_ic_or_master(update.effective_user.id):
-        return
-
+    user = update.effective_user
     text = update.message.text.strip()
+
+    if not db.is_ic_or_master(user.id):
+        # Non-IC: only handle if training has started today
+        if not _is_after_training_time():
+            return
+        if not groq_client:
+            await update.message.reply_text("❌ AI not configured.")
+            return
+        if not _check_groq_rate_limit(user.id):
+            await update.message.reply_text("⏳ Slow down — max 5 parses per minute.")
+            return
+        sender_name = (user.first_name or user.username or str(user.id)).strip()
+        try:
+            entries = _call_groq(f"{sender_name} - {text}")
+        except Exception as e:
+            logger.error("Groq parse error (non-IC): %s", e)
+            await update.message.reply_text("❌ Couldn't parse that.")
+            return
+        if not entries:
+            await update.message.reply_text("❌ Couldn't find any items in that message.")
+            return
+        by_holder = _apply_holdings(entries)
+        lines = ["✅ *Holdings logged:*\n"]
+        for items in by_holder.values():
+            for item in items:
+                lines.append(f"  • {item}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
 
     # Auto-detect forwarded attendance message
     parsed = parse_attendance_forward(text)
@@ -1167,6 +1271,7 @@ def main():
 
     app.add_handler(CommandHandler("setholding",  cmd_setholding))
     app.add_handler(CommandHandler("removeitem",  cmd_removeitem))
+    app.add_handler(CommandHandler("rename",      cmd_rename))
     app.add_handler(CommandHandler("transfer",    cmd_transfer))
     app.add_handler(CommandHandler("update",      cmd_update))
 
