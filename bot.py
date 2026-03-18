@@ -973,41 +973,48 @@ async def callback_attendance_pick(update: Update, context: ContextTypes.DEFAULT
         return
 
     # Find or auto-create a training record for this date
-    date_for_db = target_date.strftime("%d/%m/%Y")
-    matched_training = db.get_training_by_date(date_for_db)
-    if not matched_training:
-        venue    = sheet_data.get("venue") or "TBC"
-        time_str = sheet_data.get("time") or "TBC"
-        chat_id  = query.message.chat_id
-        tid = db.create_training(date_for_db, venue, time_str, reminder_chat_id=chat_id)
-        _schedule_training_reminders(context.application, tid, date_for_db, chat_id)
+    try:
+        date_for_db = target_date.strftime("%d/%m/%Y")
         matched_training = db.get_training_by_date(date_for_db)
+        if matched_training:
+            matched_training = dict(matched_training)
+        if not matched_training:
+            venue    = sheet_data.get("venue") or "TBC"
+            time_str = sheet_data.get("time") or "TBC"
+            chat_id  = query.message.chat_id
+            tid = db.create_training(date_for_db, venue, time_str, reminder_chat_id=chat_id)
+            _schedule_training_reminders(context.application, tid, date_for_db, chat_id)
+            row = db.get_training_by_date(date_for_db)
+            matched_training = dict(row) if row else None
 
-    att_msg, plan_msg = _build_attendance_msgs(sheet_data, matched_training)
+        att_msg, plan_msg = _build_attendance_msgs(sheet_data, matched_training)
 
-    if not any(
-        p.get("status") in ("present", "late")
-        for p in sheet_data["attendance"].values()
-    ):
-        await query.edit_message_text("❌ Nobody is marked as coming in the sheet yet.")
-        return
+        if not any(
+            p.get("status") in ("present", "late")
+            for p in sheet_data["attendance"].values()
+        ):
+            await query.edit_message_text("❌ Nobody is marked as coming in the sheet yet.")
+            return
 
-    await query.edit_message_text(att_msg)
-    if plan_msg:
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=plan_msg,
-            parse_mode="Markdown",
-        )
-    elif matched_training and not matched_training.get("venue", "").upper().startswith("VR"):
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=(
-                "ℹ️ *Attendance saved.* No required items set yet.\n"
-                "Run `/required 10 balls, bibs, ...` then `/delegate` for the equipment plan."
-            ),
-            parse_mode="Markdown",
-        )
+        await query.edit_message_text(att_msg)
+        if plan_msg:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=plan_msg,
+                parse_mode="Markdown",
+            )
+        elif matched_training and not matched_training.get("venue", "").upper().startswith("VR"):
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    "ℹ️ *Attendance saved.* No required items set yet.\n"
+                    "Run `/required 10 balls, bibs, ...` then `/delegate` for the equipment plan."
+                ),
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        logger.error("Error in callback_attendance_pick: %s", e, exc_info=True)
+        await query.edit_message_text(f"❌ Something went wrong: {e}")
 
 
 # Position grouping for /attendancepos
@@ -1123,21 +1130,25 @@ async def callback_attpos_pick(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    if not any(
-        p.get("status") in ("present", "late")
-        for p in sheet_data["attendance"].values()
-    ):
-        await query.edit_message_text("❌ Nobody is marked as coming in the sheet yet.")
-        return
-
     try:
-        positions = _sheets.get_positions(SHEET_ID, SHEET_POSITIONS_NAME, SHEET_CREDS)
-    except Exception as e:
-        logger.error("Position sheet fetch error in attpos_pick: %s", e)
-        positions = {}
+        if not any(
+            p.get("status") in ("present", "late")
+            for p in sheet_data["attendance"].values()
+        ):
+            await query.edit_message_text("❌ Nobody is marked as coming in the sheet yet.")
+            return
 
-    msg = _build_attendancepos_msg(sheet_data, positions)
-    await query.edit_message_text(msg)
+        try:
+            positions = _sheets.get_positions(SHEET_ID, SHEET_POSITIONS_NAME, SHEET_CREDS)
+        except Exception as e:
+            logger.error("Position sheet fetch error in attpos_pick: %s", e)
+            positions = {}
+
+        msg = _build_attendancepos_msg(sheet_data, positions)
+        await query.edit_message_text(msg)
+    except Exception as e:
+        logger.error("Error in callback_attpos_pick: %s", e, exc_info=True)
+        await query.edit_message_text(f"❌ Something went wrong: {e}")
 
 
 @ic_only
