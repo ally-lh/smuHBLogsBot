@@ -19,6 +19,7 @@ IC-only:
   /update [name] [qty?] [item], ...     ← bulk post-training update
   /training [DD/MM/YYYY] [venue] [time]
   /attendance                           ← reply to the attendance msg
+  /attendancepos                        ← attendance grouped by position (reads sheet71)
   /required [items, ...]
   /delegate                             ← generate delegation plan + copy-paste message
   /clear training|inventory|all
@@ -344,6 +345,7 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
             "<b>Training:</b>",
             "/training [DD/MM/YYYY] [venue] [time] — create a training session",
             "/attendance — pick from upcoming sessions (Google Sheets)",
+            "/attendancepos — same as /attendance but grouped by position",
             "/sheetattendance [DD/MM/YYYY] — pull attendance for a specific date",
             "/required [items, ...] — set equipment needed for training",
             "/delegate — generate equipment delegation plan",
