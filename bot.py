@@ -763,8 +763,6 @@ def _build_attendance_msgs(sheet_data: dict, training) -> tuple[str, Optional[st
             parts = ["late"]
             if parsed.get("reason"):
                 parts.append(parsed["reason"])
-            if parsed.get("eta"):
-                parts.append(parsed["eta"])
             coming.append(f"{name} ({', '.join(parts)})")
             db_attendees.append((name.lower().strip(), "late", parsed.get("eta")))
 
@@ -1037,11 +1035,18 @@ def _build_attendancepos_msg(sheet_data: dict, positions: dict) -> str:
     for name, parsed in attendance.items():
         if parsed.get("status") not in ("present", "late"):
             continue
+        if parsed.get("status") == "late":
+            parts = ["late"]
+            if parsed.get("reason"):
+                parts.append(parsed["reason"])
+            display = f"{name} ({', '.join(parts)})"
+        else:
+            display = name
         pos = positions.get(name, "")
         if pos in groups:
-            groups[pos].append(name)
+            groups[pos].append(display)
         else:
-            unknown.append(name)
+            unknown.append(display)
 
     lines = [f"Attendance {date_str}", ""]
     for pos in _POS_ORDER:
@@ -1143,13 +1148,6 @@ async def callback_attpos_pick(update: Update, context: ContextTypes.DEFAULT_TYP
 
 @ic_only
 async def cmd_required(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    training = db.get_active_training()
-    if not training:
-        await update.message.reply_text(
-            "❌ No active training. Create one with `/training` first.",
-            parse_mode="Markdown",
-        )
-        return
     if not context.args:
         await update.message.reply_text(
             "Usage: `/required [items, ...]`\n"
@@ -1163,12 +1161,92 @@ async def cmd_required(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Couldn't parse any items.")
         return
 
-    db.set_required_items(training["id"], items)
+    if not _sheets_enabled:
+        # Fallback: apply to active training directly
+        training = db.get_active_training()
+        if not training:
+            await update.message.reply_text(
+                "❌ No active training. Create one with `/training` first.",
+                parse_mode="Markdown",
+            )
+            return
+        db.set_required_items(training["id"], items)
+        lines = [f"✅ *Required for {training['date']} ({training['venue']}):*\n"]
+        for item, qty in items:
+            lines.append(f"• {fmt(item, qty)}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
 
-    lines = [f"✅ *Required for {training['date']} ({training['venue']}):*\n"]
+    # Store items and show session picker
+    context.user_data["req_items"] = items
+
+    try:
+        sessions = _sheets.get_upcoming_sessions(SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=3)
+    except Exception as e:
+        logger.error("Sheet session fetch error: %s", e)
+        await update.message.reply_text(f"❌ Couldn't read sheet: {e}")
+        return
+
+    if not sessions:
+        await update.message.reply_text("❌ No upcoming training sessions found in the sheet.")
+        return
+
+    keyboard = []
+    for s in sessions:
+        label         = s["date"].strftime("%-d %b") + f"  ·  {s['venue']}  ·  {s['time']}"
+        callback_data = f"req_pick_{s['date'].strftime('%d%m%Y')}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=callback_data)])
+
+    await update.message.reply_text(
+        "Which training do you want to set required items for?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def callback_required_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle training date selection from /required inline keyboard."""
+    query = update.callback_query
+    await query.answer()
+
+    if not db.is_ic_or_master(query.from_user.id):
+        await query.edit_message_text("🔒 IC or master access required.")
+        return
+
+    date_str = query.data.replace("req_pick_", "")  # DDMMYYYY
+    try:
+        target_date = datetime.strptime(date_str, "%d%m%Y").date()
+    except ValueError:
+        await query.edit_message_text("❌ Invalid date.")
+        return
+
+    items = context.user_data.get("req_items")
+    if not items:
+        await query.edit_message_text(
+            "❌ No items found. Please run `/required` again.",
+            parse_mode="Markdown",
+        )
+        return
+
+    date_for_db = target_date.strftime("%d/%m/%Y")
+    matched_training = db.get_training_by_date(date_for_db)
+    if matched_training:
+        matched_training = dict(matched_training)
+
+    if not matched_training:
+        await query.edit_message_text(
+            f"❌ No training record for {target_date.strftime('%-d %b %Y')}. "
+            "Run `/attendance` first to register the session.",
+            parse_mode="Markdown",
+        )
+        return
+
+    db.set_required_items(matched_training["id"], items)
+    context.user_data.pop("req_items", None)
+
+    lines = [f"✅ *Required for {matched_training['date']} ({matched_training['venue']}):*\n"]
     for item, qty in items:
         lines.append(f"• {fmt(item, qty)}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
 
 
 @ic_only
@@ -1941,8 +2019,6 @@ async def _auto_attendance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             parts = ["late"]
             if parsed.get("reason"):
                 parts.append(parsed["reason"])
-            if parsed.get("eta"):
-                parts.append(parsed["eta"])
             coming.append(f"{name} ({', '.join(parts)})")
             db_attendees.append((name.lower().strip(), "late", parsed.get("eta")))
 
@@ -2169,6 +2245,7 @@ def main():
     app.add_handler(CommandHandler("sheetattendance",   cmd_sheetattendance))
     app.add_handler(CallbackQueryHandler(callback_attendance_pick, pattern="^att_pick_"))
     app.add_handler(CallbackQueryHandler(callback_attpos_pick,    pattern="^attpos_pick_"))
+    app.add_handler(CallbackQueryHandler(callback_required_pick,  pattern="^req_pick_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_holdings))
 
     # Poll Google Sheet every 5 minutes on training days
