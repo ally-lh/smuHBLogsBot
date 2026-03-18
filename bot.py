@@ -827,12 +827,6 @@ def _build_attendance_msgs(sheet_data: dict, training) -> tuple[str, Optional[st
 @ic_only
 async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     training = db.get_active_training()
-    if not training:
-        await update.message.reply_text(
-            "❌ No active training. Create one first with `/training`.",
-            parse_mode="Markdown",
-        )
-        return
 
     # Priority: reply-to message > inline args > generate from sheet
     if update.message.reply_to_message:
@@ -840,7 +834,7 @@ async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif context.args:
         text = " ".join(context.args)
     else:
-        # Show the next 3 upcoming training sessions as buttons
+        # No-arg path: show the next 3 upcoming training sessions as buttons (sheet-based)
         if not _sheets_enabled:
             await update.message.reply_text(
                 "Reply to the attendance message with `/attendance`\n\n"
@@ -870,6 +864,13 @@ async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Which training do you want the attendance list for?",
             reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if not training:
+        await update.message.reply_text(
+            "❌ No active training. Create one first with `/training`.",
+            parse_mode="Markdown",
         )
         return
 
