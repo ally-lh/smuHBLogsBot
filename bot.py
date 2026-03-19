@@ -23,6 +23,8 @@ IC-only:
   /training [DD/MM/YYYY] [venue] [time] ← optional: manually create training
   /required [items, ...]
   /delegate                             ← generate delegation plan + copy-paste message
+  /alias [sheet_name] as [display_name] ← map sheet name to display name
+  /unalias [sheet_name]                 ← remove a name alias
   /clear training|inventory|all
   /handover @username
   /reminderchat                         ← redirect training reminders to current chat
@@ -374,6 +376,8 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
             "/update [name] [qty] [item], ... — bulk post-training update",
             "",
             "<b>Admin:</b>",
+            "/alias [sheet_name] as [display_name] — map a sheet name to a display name",
+            "/unalias [sheet_name] — remove a name alias",
             "/clear training|inventory|all — wipe data",
             "/handover @username — hand over IC role",
             "/listic — list who has IC/master access",
@@ -663,10 +667,7 @@ async def cmd_update(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     if groq_client and _check_groq_rate_limit(update.effective_user.id):
         try:
             entries = _call_groq(body)
-            if entries is not None:
-                if not entries:
-                    await update.message.reply_text("❌ Couldn't find any holdings in that message.")
-                    return
+            if entries:
                 by_holder = _apply_holdings(entries)
                 lines = ["✅ *Inventory updated:*\n"]
                 for name, items in sorted(by_holder.items()):
@@ -675,6 +676,7 @@ async def cmd_update(update: Update, _context: ContextTypes.DEFAULT_TYPE):
                         lines.append(f"  • {item}")
                 await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
                 return
+            # entries is None (Groq failed) or [] (Groq found nothing) — fall through to manual parser
         except Exception as e:
             logger.error("Groq parse error in /update: %s", e)
             # Fall through to manual parser
@@ -755,16 +757,18 @@ def _build_attendance_msgs(sheet_data: dict, training) -> tuple[str, Optional[st
     coming       = []
     db_attendees = []
     for name, parsed in sheet_data["attendance"].items():
+        display = resolve_name(name).title()
+        canon   = resolve_name(name)
         s = parsed.get("status")
         if s == "present":
-            coming.append(name)
-            db_attendees.append((name.lower().strip(), "present", None))
+            coming.append(display)
+            db_attendees.append((canon, "present", None))
         elif s == "late":
             parts = ["late"]
             if parsed.get("reason"):
                 parts.append(parsed["reason"])
-            coming.append(f"{name} ({', '.join(parts)})")
-            db_attendees.append((name.lower().strip(), "late", parsed.get("eta")))
+            coming.append(f"{display} ({', '.join(parts)})")
+            db_attendees.append((canon, "late", parsed.get("eta")))
 
     if training and db_attendees:
         db.set_attendance(training["id"], db_attendees)
@@ -1266,7 +1270,13 @@ async def cmd_delegate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No attendance. Use `/attendance` first.", parse_mode="Markdown")
         return
 
-    attending = {r["name"] for r in attendance if r["status"] != "absent"}
+    # Normalise attendance names: keep both full name and first token so that
+    # "szehan binte" in the sheet still matches inventory holder "szehan".
+    attending_raw = {r["name"] for r in attendance if r["status"] != "absent"}
+    attending: set[str] = set()
+    for n in attending_raw:
+        attending.add(n.lower().strip())
+        attending.add(n.lower().strip().split()[0])  # first name fallback
 
     # Build inventory map: item → [(holder, qty)]
     inv_map: dict[str, list[tuple[str, int]]] = {}
@@ -1374,6 +1384,64 @@ async def cmd_delegate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     plan_lines += group
     await update.message.reply_text("\n".join(plan_lines), parse_mode="Markdown")
+
+
+# ──────────────────────────────────────────────────────────────
+# IC — NAME ALIASES
+# ──────────────────────────────────────────────────────────────
+
+@ic_only
+async def cmd_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /alias [sheet_name] as [display_name]  — map a sheet name to a display name
+    /alias                                 — list all active aliases
+    """
+    if not context.args:
+        aliases = db.get_all_name_aliases()
+        if not aliases:
+            await update.message.reply_text("ℹ️ No aliases set yet.\n\nUsage: `/alias szehan as saan`", parse_mode="Markdown")
+            return
+        lines = ["📋 *Name aliases (sheet → display):*\n"]
+        for sheet, display in sorted(aliases.items()):
+            lines.append(f"• `{sheet}` → `{display}`")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    raw = " ".join(context.args)
+    m = re.match(r'^(\S+)\s+as\s+(\S+)$', raw, re.IGNORECASE)
+    if not m:
+        await update.message.reply_text(
+            "Usage: `/alias [sheet_name] as [display_name]`\nExample: `/alias szehan as saan`",
+            parse_mode="Markdown",
+        )
+        return
+
+    sheet_name   = m.group(1).lower().strip()
+    display_name = m.group(2).lower().strip()
+    db.set_name_alias(sheet_name, display_name)
+    NAME_ALIASES[sheet_name] = display_name
+    await update.message.reply_text(
+        f"✅ Alias saved: `{sheet_name}` → `{display_name}`\n\n"
+        f"Sheet entries named *{sheet_name}* will now appear as *{display_name.title()}* in messages. "
+        f"Both names are accepted in commands.",
+        parse_mode="Markdown",
+    )
+
+
+@ic_only
+async def cmd_unalias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /unalias [sheet_name]  — remove an alias
+    """
+    if not context.args:
+        await update.message.reply_text("Usage: `/unalias [sheet_name]`", parse_mode="Markdown")
+        return
+    sheet_name = context.args[0].lower().strip()
+    if db.remove_name_alias(sheet_name):
+        NAME_ALIASES.pop(sheet_name, None)
+        await update.message.reply_text(f"✅ Alias for `{sheet_name}` removed.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"❌ No alias found for `{sheet_name}`.", parse_mode="Markdown")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -2016,16 +2084,18 @@ async def _auto_attendance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     coming       = []
     db_attendees = []
     for name, parsed in sheet_data["attendance"].items():
+        display = resolve_name(name).title()
+        canon   = resolve_name(name)
         s = parsed.get("status")
         if s == "present":
-            coming.append(name)
-            db_attendees.append((name.lower().strip(), "present", None))
+            coming.append(display)
+            db_attendees.append((canon, "present", None))
         elif s == "late":
             parts = ["late"]
             if parsed.get("reason"):
                 parts.append(parsed["reason"])
-            coming.append(f"{name} ({', '.join(parts)})")
-            db_attendees.append((name.lower().strip(), "late", parsed.get("eta")))
+            coming.append(f"{display} ({', '.join(parts)})")
+            db_attendees.append((canon, "late", parsed.get("eta")))
 
     if not coming:
         return
@@ -2206,6 +2276,7 @@ def _schedule_training_reminders(app, training_id: int, date_str: str, chat_id: 
 def main():
     db.init_db(MASTER_ID)
     logger.info("Database initialised. Master ID: %d", MASTER_ID)
+    NAME_ALIASES.update(db.get_all_name_aliases())
 
     purged = db.purge_old_trainings(days=14)
     if purged:
@@ -2240,6 +2311,9 @@ def main():
     app.add_handler(CommandHandler("attendancepos", cmd_attendancepos))
     app.add_handler(CommandHandler("required",      cmd_required))
     app.add_handler(CommandHandler("delegate",    cmd_delegate))
+
+    app.add_handler(CommandHandler("alias",             cmd_alias))
+    app.add_handler(CommandHandler("unalias",           cmd_unalias))
 
     app.add_handler(CommandHandler("clear",             cmd_clear))
     app.add_handler(CallbackQueryHandler(callback_clear, pattern="^clear_"))

@@ -66,6 +66,11 @@ def init_db(master_id: int) -> None:
             from_role    TEXT NOT NULL,
             created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS name_aliases (
+            sheet_name   TEXT PRIMARY KEY COLLATE NOCASE,
+            display_name TEXT NOT NULL COLLATE NOCASE
+        );
     """)
     # Add reminder_chat_id column if it doesn't exist yet (migration)
     try:
@@ -413,6 +418,42 @@ def purge_old_trainings(days: int = 14) -> int:
     conn.commit()
     conn.close()
     return len(old_ids)
+
+
+# ──────────────────────────────────────────────────────────────
+# NAME ALIASES
+# ──────────────────────────────────────────────────────────────
+
+def set_name_alias(sheet_name: str, display_name: str) -> None:
+    """Map sheet_name → display_name. Overwrites if sheet_name already exists."""
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO name_aliases (sheet_name, display_name) VALUES (?, ?)
+           ON CONFLICT(sheet_name) DO UPDATE SET display_name = excluded.display_name""",
+        (sheet_name.lower().strip(), display_name.lower().strip()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def remove_name_alias(sheet_name: str) -> bool:
+    """Remove an alias. Returns True if it existed."""
+    conn = get_conn()
+    cur = conn.execute(
+        "DELETE FROM name_aliases WHERE sheet_name = ?",
+        (sheet_name.lower().strip(),),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def get_all_name_aliases() -> dict[str, str]:
+    """Return {sheet_name: display_name} for all stored aliases."""
+    conn = get_conn()
+    rows = conn.execute("SELECT sheet_name, display_name FROM name_aliases").fetchall()
+    conn.close()
+    return {r["sheet_name"]: r["display_name"] for r in rows}
 
 
 def clear_active_training() -> bool:

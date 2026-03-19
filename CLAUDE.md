@@ -16,6 +16,10 @@
 
 ## Command design rules
 
+**Check existing functions:**
+- If modified one function, ensure all related functions or similar functions are modified to use the new function properly, without error. Example, if /update is modified, /setholding should be do. `/attendance` and `/attendancepos` is another example.
+- always ensure all functions are working with every change
+
 **Be consistent with existing patterns:**
 - Commands that read from Google Sheets show a date-picker keyboard (3 upcoming sessions as buttons)
 - Callback data prefixes must be unique: `att_pick_`, `attpos_pick_`, `clear_`, etc.
@@ -32,6 +36,7 @@
 - Sheet fetch failures → show `❌ Couldn't read sheet: {e}`, log with `logger.error`
 - No data found → friendly message explaining what's missing and what to do next
 - Permission failures → `🔒 IC or master access required.`
+
 
 ---
 
@@ -101,6 +106,8 @@ Display labels:  `Keeper`,     `Pivots`, `CBs`, `Wings`
 - `/update [name] [qty?] [item], ...` — bulk post-training update
 
 ### IC-only (Admin)
+- `/alias [sheet_name] as [display_name]` — map a sheet name to a display name; `/alias` alone lists all
+- `/unalias [sheet_name]` — remove a name alias
 - `/clear training|inventory|all` — wipe data
 - `/handover @username` — hand over IC role
 - `/listic` — list IC/master users
