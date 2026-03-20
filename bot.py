@@ -14,13 +14,13 @@ Public (anyone can DM the bot):
   /whohas [name]       — what someone is holding
   /players             — list all player names in the DB
   /acceptic            — accept a pending IC handover
+  /update [name] [qty?] [item], ...     ← bulk inventory update
   /ask [question]      — ask the bot a question about commands or logistics
 
 IC-only:
   /setholding [name] [qty?] [item]
   /removeitem [name] [item]
   /transfer [item] from [name] to [name]
-  /update [name] [qty?] [item], ...     ← bulk post-training update
   /training [DD/MM/YYYY] [venue] [time] ← optional: manually create training
   /required [items, ...]
   /delegate                             ← generate delegation plan + copy-paste message
@@ -332,6 +332,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("\n/help — all commands")
     else:
         lines += [
+            "Welcome! I'm the smuHBLogs bot, here to help track handball training logistics.\n (It was too manual before)\n\nStart by checking attendance and inventory:",
             "📦 /inventory — see all equipment holdings",
             "📦 /inventory [item] — who has something specific",
             "👤 /whohas [name] — what someone is holding",
@@ -357,6 +358,7 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         "/whohas [name] — see what someone is holding",
         "/players — list all player names in the DB",
         "/acceptic — accept a pending IC handover",
+        "/update [name] [qty] [item], ... — bulk inventory update",
         "/ask [question] — ask a question about commands or logistics",
     ]
 
@@ -375,7 +377,6 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
             "/removeitem [name] [item] — remove item from someone",
             "/rename [old] to [new] — rename a holder",
             "/transfer [item] from [name] to [name] — move item between holders",
-            "/update [name] [qty] [item], ... — bulk post-training update",
             "",
             "<b>Admin:</b>",
             "/alias [sheet_name] as [display_name] — map a sheet name to a display name",
@@ -642,7 +643,6 @@ def _parse_holdings_manual(body: str) -> tuple[list[tuple[str, str, int]], list[
     return results, errors
 
 
-@ic_only
 async def cmd_update(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     """
     Bulk post-training inventory update. Accepts any format:
@@ -1762,7 +1762,7 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     question = " ".join(context.args)
     try:
         response = groq_client.chat.completions.create(
-            model="llama3-8b-8192",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": _HELP_SYSTEM_PROMPT},
                 {"role": "user", "content": question},
@@ -1879,7 +1879,7 @@ def _call_groq(text: str) -> list | None:
     Raises on hard errors (let caller handle).
     """
     response = groq_client.chat.completions.create(
-        model="llama3-8b-8192",
+        model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": _HOLDINGS_PROMPT + text}],
         temperature=0,
     )
