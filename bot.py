@@ -338,7 +338,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👤 /whohas [name] — what someone is holding",
             "✅ /acceptic — accept a pending IC handover",
         ]
-        keyboard = [["/attendance", "/inventory"], ["/update", "/start"]]
+        keyboard = [["/attendance", "/inventory"], ["/update", "/help"]]
 
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=reply_markup)
@@ -411,11 +411,9 @@ async def cmd_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     rows = db.get_full_inventory()
     if not rows:
-        await update.message.reply_text(
-            "📭 Inventory is empty.\n"
-            "Use `/setholding` or `/update` to log who has what.",
-            parse_mode="Markdown",
-        )
+        is_ic = db.is_ic_or_master(update.effective_user.id)
+        hint  = "Use `/setholding` or `/update` to log who has what." if is_ic else "Use `/update` to log who has what."
+        await update.message.reply_text(f"📭 Inventory is empty.\n{hint}", parse_mode="Markdown")
         return
 
     # Group items by holder for a cleaner display
@@ -453,10 +451,9 @@ async def cmd_players(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     """List all player names currently in the inventory DB."""
     holders = db.get_all_holders()
     if not holders:
-        await update.message.reply_text(
-            "📭 No players in the DB yet.\nUse `/update` or `/setholding` to log inventory.",
-            parse_mode="Markdown",
-        )
+        is_ic = db.is_ic_or_master(update.effective_user.id)
+        hint  = "Use `/update` or `/setholding` to log inventory." if is_ic else "Use `/update` to log inventory."
+        await update.message.reply_text(f"📭 No players in the DB yet.\n{hint}", parse_mode="Markdown")
         return
     lines = [f"👥 *Players in DB ({len(holders)}):*\n"]
     for h in holders:
@@ -1686,6 +1683,7 @@ Commands (anyone):
 /whohas [name]
 /players
 /acceptic
+/update [name] [qty] [item], ...
 /ask [question]
 
 Commands (IC only):
@@ -1698,7 +1696,6 @@ Commands (IC only):
 /removeitem
 /rename
 /transfer
-/update
 /alias
 /unalias
 /clear
@@ -1718,13 +1715,12 @@ Example:
 "Use /required to set equipment needed for the training."
 
 2. If user gives messy logistics info:
-→ Convert into command format
+→ Convert into /update format (available to everyone)
 Example:
 Input: "ella has 4 balls and im bringing bands"
 Output:
 "Use:
-/setholding Ella balls 4
-/setholding Ally bands"
+/update ella 4 balls, [your name] bands"
 
 3. If user asks about items:
 → Point to inventory commands
@@ -1771,12 +1767,29 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _check_groq_rate_limit(update.effective_user.id):
         await update.message.reply_text("⏳ Slow down — max 5 questions per minute.")
         return
+
+    role   = db.get_role(update.effective_user.id) or "viewer"
+    is_ic  = role in ("ic", "master")
+    if role == "master":
+        role_note = "USER ROLE: master — may use all commands including master-only."
+    elif is_ic:
+        role_note = "USER ROLE: ic — may use all commands EXCEPT master-only commands. Do NOT suggest /removeic."
+    else:
+        role_note = (
+            "USER ROLE: viewer (not IC) — may ONLY use commands from the 'Commands (anyone)' list "
+            "(includes /update). "
+            "Do NOT suggest any IC-only or master-only commands. "
+            "If their question requires an IC command (e.g. /setholding, /delegate, /required), "
+            "tell them to ask an IC to run it instead."
+        )
+    system_content = role_note + "\n\n" + _HELP_SYSTEM_PROMPT
+
     question = " ".join(context.args)
     try:
         response = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": _HELP_SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": question},
             ],
             temperature=0,

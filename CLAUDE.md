@@ -83,16 +83,18 @@ Display labels:  `Keeper`,     `Pivots`, `CBs`, `Wings`
 
 ### Anyone
 - `/start` — welcome message + status
+- `/attendance` — pick from upcoming sessions (view attendance)
+- `/attendancepos` — same as /attendance but grouped by position
 - `/inventory [item?]` — view all holdings or search by item
 - `/whohas [name]` — see what someone holds
 - `/players` — list all player names currently in the DB
 - `/acceptic` — accept a pending IC handover
+- `/update [name] [qty?] [item], ...` — bulk inventory update
+- `/ask [question]` — ask a question about commands or logistics
 - `/help` — this list
 
 ### IC-only (Training)
-- `/attendance` — pick a session from sheet, auto-creates training record if needed, save to DB
 - `/training [DD/MM/YYYY] [venue] [time]` — manually create a training session (optional)
-- `/attendancepos` — same picker, output grouped by position (reads from sheet71)
 - `/sheetattendance [DD/MM/YYYY]` — pull attendance for a specific date
 - `/required [items, ...]` — set equipment needed
 - `/delegate` — generate equipment delegation plan + copy-paste message
@@ -103,7 +105,6 @@ Display labels:  `Keeper`,     `Pivots`, `CBs`, `Wings`
 - `/removeitem [name] [item]` — remove item
 - `/rename [old] to [new]` — rename a holder
 - `/transfer [item] from [name] to [name]` — move item
-- `/update [name] [qty?] [item], ...` — bulk post-training update
 
 ### IC-only (Admin)
 - `/alias [sheet_name] as [display_name]` — map a sheet name to a display name; `/alias` alone lists all
