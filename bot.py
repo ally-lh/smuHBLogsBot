@@ -405,7 +405,7 @@ async def cmd_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         lines = [f'📦 *Who has "{query}":*\n']
         for r in rows:
-            lines.append(f"• {r['holder'].title()} — {fmt(r['item'], r['quantity'])}")
+            lines.append(f"• {resolve_name(r['holder']).title()} — {fmt(r['item'], r['quantity'])}")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         return
 
@@ -421,7 +421,7 @@ async def cmd_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Group items by holder for a cleaner display
     holders: dict[str, list[str]] = {}
     for r in rows:
-        holders.setdefault(r["holder"].title(), []).append(fmt(r["item"], r["quantity"]))
+        holders.setdefault(resolve_name(r["holder"]).title(), []).append(fmt(r["item"], r["quantity"]))
 
     lines = ["📦 *Current Inventory*\n"]
     for name, items in sorted(holders.items()):
@@ -460,7 +460,7 @@ async def cmd_players(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         return
     lines = [f"👥 *Players in DB ({len(holders)}):*\n"]
     for h in holders:
-        lines.append(f"• {h.title()}")
+        lines.append(f"• {resolve_name(h).title()}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -501,7 +501,7 @@ async def cmd_removeitem(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
         return
-    holder = context.args[0]
+    holder = resolve_name(context.args[0])
     item   = " ".join(context.args[1:])
     if db.remove_holding(holder, item):
         await update.message.reply_text(
@@ -789,8 +789,16 @@ def _build_attendance_msgs(sheet_data: dict, training) -> tuple[str, Optional[st
     if not required:
         return att_msg, None
 
-    attending = {name.lower().strip() for name, parsed in sheet_data["attendance"].items()
-                 if parsed.get("status") in ("present", "late")}
+    attending: set[str] = set()
+    for _n, _p in sheet_data["attendance"].items():
+        if _p.get("status") not in ("present", "late"):
+            continue
+        _lower = _n.lower().strip()
+        _first = _lower.split()[0]
+        attending.add(_lower)
+        attending.add(_first)
+        attending.add(resolve_name(_lower))
+        attending.add(resolve_name(_first))
 
     inv_map: dict[str, list[tuple[str, int]]] = {}
     for r in db.get_full_inventory():
@@ -830,7 +838,7 @@ def _build_attendance_msgs(sheet_data: dict, training) -> tuple[str, Optional[st
 
     by_holder: dict[str, list[str]] = {}
     for holder, item, qty in bringing:
-        by_holder.setdefault(holder.title(), []).append(fmt(item, qty))
+        by_holder.setdefault(resolve_name(holder).title(), []).append(fmt(item, qty))
 
     plan_lines = [f"📋 *Equipment Plan — {date_str} · {venue} · {time_str}*\n"]
     if by_holder:
@@ -841,7 +849,7 @@ def _build_attendance_msgs(sheet_data: dict, training) -> tuple[str, Optional[st
     if passes:
         plan_lines.append("🔄 *Passes needed:*")
         for from_h, to_h, item, qty in passes:
-            plan_lines.append(f"• {from_h.title()} → pass {fmt(item, qty)} to {to_h.title()}")
+            plan_lines.append(f"• {resolve_name(from_h).title()} → pass {fmt(item, qty)} to {resolve_name(to_h).title()}")
         plan_lines.append("")
     if missing:
         plan_lines.append("❓ *Not found / shortfall:*")
@@ -860,7 +868,7 @@ def _build_attendance_msgs(sheet_data: dict, training) -> tuple[str, Optional[st
     if passes:
         group.append("\nPasses needed before training:")
         for from_h, to_h, item, qty in passes:
-            group.append(f"• {from_h.title()}, please pass {fmt(item, qty)} to {to_h.title()} ✅")
+            group.append(f"• {resolve_name(from_h).title()}, please pass {fmt(item, qty)} to {resolve_name(to_h).title()} ✅")
     if missing:
         group.append("\nStill checking:")
         for item, qty in missing:
@@ -1046,10 +1054,10 @@ def _build_attendancepos_msg(sheet_data: dict, positions: dict) -> str:
             parts = ["late"]
             if parsed.get("reason"):
                 parts.append(parsed["reason"])
-            display = f"{name} ({', '.join(parts)})"
+            display = f"{resolve_name(name)} ({', '.join(parts)})"
         else:
-            display = name
-        pos = positions.get(name, "")
+            display = resolve_name(name)
+        pos = positions.get(name, "") or positions.get(resolve_name(name), "")
         if pos in groups:
             groups[pos].append(display)
         else:
@@ -1278,8 +1286,12 @@ async def cmd_delegate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     attending_raw = {r["name"] for r in attendance if r["status"] != "absent"}
     attending: set[str] = set()
     for n in attending_raw:
-        attending.add(n.lower().strip())
-        attending.add(n.lower().strip().split()[0])  # first name fallback
+        lower = n.lower().strip()
+        first = lower.split()[0]
+        attending.add(lower)
+        attending.add(first)
+        attending.add(resolve_name(lower))   # alias of full name
+        attending.add(resolve_name(first))   # alias of first name
 
     # Build inventory map: item → [(holder, qty)]
     inv_map: dict[str, list[tuple[str, int]]] = {}
@@ -2066,18 +2078,19 @@ async def cmd_sheetattendance(update: Update, context: ContextTypes.DEFAULT_TYPE
     present, late, absent, tbc, no_resp, other = [], [], [], [], [], []
     for name, parsed in attendance.items():
         s = parsed.get("status")
+        rname = resolve_name(name)
         if s == "present":
-            present.append(name)
+            present.append(rname)
         elif s == "late":
-            late.append((name, parsed))
+            late.append((rname, parsed))
         elif s == "absent":
-            absent.append((name, parsed))
+            absent.append((rname, parsed))
         elif s == "tbc":
-            tbc.append((name, parsed))
+            tbc.append((rname, parsed))
         elif s == "no response":
-            no_resp.append(name)
+            no_resp.append(rname)
         else:
-            other.append((name, parsed))
+            other.append((rname, parsed))
 
     venue_str = f" · {result['venue']}" if result["venue"] else ""
     time_str  = f" · {result['time']}"  if result["time"]  else ""
