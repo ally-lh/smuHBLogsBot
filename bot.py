@@ -14,6 +14,7 @@ Public (anyone can DM the bot):
   /whohas [name]       — what someone is holding
   /players             — list all player names in the DB
   /acceptic            — accept a pending IC handover
+  /ask [question]      — ask the bot a question about commands or logistics
 
 IC-only:
   /setholding [name] [qty?] [item]
@@ -45,7 +46,7 @@ from zoneinfo import ZoneInfo
 from collections import defaultdict, deque
 from dotenv import load_dotenv
 load_dotenv()
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 import database as db
@@ -356,6 +357,7 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         "/whohas [name] — see what someone is holding",
         "/players — list all player names in the DB",
         "/acceptic — accept a pending IC handover",
+        "/ask [question] — ask a question about commands or logistics",
     ]
 
     if is_ic:
@@ -385,6 +387,7 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         if role == "master":
             lines.append("/removeic @username — revoke IC access")
 
+    lines += ["", "💬 <i>Got a question? /ask [question]</i>"]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -1325,7 +1328,7 @@ async def cmd_delegate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Group bringing list by holder ──────────────────────────
     by_holder: dict[str, list[str]] = {}
     for holder, item, qty in bringing:
-        by_holder.setdefault(holder.title(), []).append(fmt(item, qty))
+        by_holder.setdefault(resolve_name(holder).title(), []).append(fmt(item, qty))
 
     # ── Internal delegation plan (detailed) ────────────────────
     plan_lines = [
@@ -1344,7 +1347,7 @@ async def cmd_delegate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plan_lines.append("🔄 *Passes needed before training:*")
         for from_h, to_h, item, qty in passes:
             plan_lines.append(
-                f"• {from_h.title()} → pass {fmt(item, qty)} to {to_h.title()}"
+                f"• {resolve_name(from_h).title()} → pass {fmt(item, qty)} to {resolve_name(to_h).title()}"
             )
         plan_lines.append("")
 
@@ -1375,7 +1378,7 @@ async def cmd_delegate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         group.append("\nPasses needed before training:")
         for from_h, to_h, item, qty in passes:
             group.append(
-                f"• {from_h.title()}, please pass {fmt(item, qty)} to {to_h.title()} ✅"
+                f"• {resolve_name(from_h).title()}, please pass {fmt(item, qty)} to {resolve_name(to_h).title()} ✅"
             )
     if missing:
         group.append("\nStill checking:")
@@ -1627,6 +1630,152 @@ async def cmd_removeic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ *@{username}* not found in IC list.",
             parse_mode="Markdown",
         )
+
+
+# ──────────────────────────────────────────────────────────────
+# AI — HELP ASSISTANT
+# ──────────────────────────────────────────────────────────────
+
+_HELP_SYSTEM_PROMPT = """\
+You are a concise assistant for a Telegram handball logistics bot (smuHBLogs).
+
+Your ONLY purpose is to help users understand and use bot commands for team logistics.
+
+----------------------------------------
+SCOPE RULES
+----------------------------------------
+You may ONLY:
+- Explain bot commands
+- Help users choose the correct command
+- Clarify logistics workflows (equipment, attendance, delegation, handover)
+- Reformat messy user input into commands
+
+If a message is unrelated to bot usage or team logistics, reply EXACTLY:
+"I can only help with bot commands and team logistics. Try /help for the full list."
+
+----------------------------------------
+BEHAVIOUR RULES
+----------------------------------------
+- Be concise. Max 1–3 short sentences unless listing commands
+- Do NOT explain internal logic, database, or system design
+- Do NOT guess missing information — ask a short clarifying question instead
+- Do NOT invent commands
+- Only use commands from the list below
+- If user intent is unclear → suggest closest valid command
+
+----------------------------------------
+COMMAND RULES
+----------------------------------------
+
+Commands (anyone):
+/attendance
+/attendancepos
+/inventory [item]
+/whohas [name]
+/players
+/acceptic
+/ask [question]
+
+Commands (IC only):
+/training
+/sheetattendance
+/required
+/delegate
+/reminderchat
+/setholding
+/removeitem
+/rename
+/transfer
+/update
+/alias
+/unalias
+/clear
+/handover
+/listic
+
+Commands (master only):
+/removeic
+
+----------------------------------------
+RESPONSE PATTERNS
+----------------------------------------
+
+1. If user asks "what do I do":
+→ Suggest ONE best command
+Example:
+"Use /required to set equipment needed for the training."
+
+2. If user gives messy logistics info:
+→ Convert into command format
+Example:
+Input: "ella has 4 balls and im bringing bands"
+Output:
+"Use:
+/setholding Ella balls 4
+/setholding Ally bands"
+
+3. If user asks about items:
+→ Point to inventory commands
+Example:
+"Use /inventory balls or /whohas Ella"
+
+4. If delegation-related:
+→ Suggest /delegate
+Example:
+"Run /delegate after setting attendance and required items."
+
+5. If attendance-related:
+→ Suggest /attendance or /sheetattendance
+
+6. If handover-related:
+→ Suggest /handover or /transfer
+
+7. If missing info:
+→ Ask ONE short clarifying question
+Example:
+"Which training is this for?"
+
+----------------------------------------
+STYLE
+----------------------------------------
+- Direct, no fluff
+- No emojis unless user uses them first
+- No long explanations
+- Prefer command-first answers
+
+----------------------------------------
+FAILSAFE
+----------------------------------------
+If unsure:
+→ Suggest /help OR the closest matching command"""
+
+async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: `/ask [your question]`\nExample: `/ask how do I transfer an item?`", parse_mode="Markdown")
+        return
+    if not groq_client:
+        await update.message.reply_text("❌ AI not configured (GROQ_API_KEY missing).")
+        return
+    if not _check_groq_rate_limit(update.effective_user.id):
+        await update.message.reply_text("⏳ Slow down — max 5 questions per minute.")
+        return
+    question = " ".join(context.args)
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[
+                {"role": "system", "content": _HELP_SYSTEM_PROMPT},
+                {"role": "user", "content": question},
+            ],
+            temperature=0,
+            max_tokens=256,
+        )
+        answer = response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error("Help AI error: %s", e)
+        await update.message.reply_text("❌ Couldn't get an answer. Try again.")
+        return
+    await update.message.reply_text(f"💬 {answer}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -2273,6 +2422,37 @@ def _schedule_training_reminders(app, training_id: int, date_str: str, chat_id: 
 # MAIN
 # ──────────────────────────────────────────────────────────────
 
+async def post_init(app):
+    """Register commands so Telegram shows autocomplete when users type /."""
+    public_commands = [
+        BotCommand("start",           "Welcome message + status"),
+        BotCommand("inventory",       "View all holdings or search by item"),
+        BotCommand("whohas",          "See what someone is holding"),
+        BotCommand("players",         "List all player names in the DB"),
+        BotCommand("acceptic",        "Accept a pending IC handover"),
+        BotCommand("help",            "Show all available commands"),
+        BotCommand("attendance",      "Pick a session and view attendance"),
+        BotCommand("attendancepos",   "Attendance grouped by position"),
+        BotCommand("sheetattendance", "Pull attendance for a specific date"),
+        BotCommand("training",        "Manually create a training session"),
+        BotCommand("required",        "Set equipment needed for training"),
+        BotCommand("delegate",        "Generate equipment delegation plan"),
+        BotCommand("reminderchat",    "Redirect auto-reminders to this chat"),
+        BotCommand("setholding",      "Assign an item to someone"),
+        BotCommand("removeitem",      "Remove an item from someone"),
+        BotCommand("rename",          "Rename a holder"),
+        BotCommand("transfer",        "Move an item between holders"),
+        BotCommand("update",          "Bulk post-training inventory update"),
+        BotCommand("alias",           "Map a sheet name to a display name"),
+        BotCommand("unalias",         "Remove a name alias"),
+        BotCommand("clear",           "Wipe training, inventory, or all data"),
+        BotCommand("handover",        "Hand over IC role to someone"),
+        BotCommand("listic",          "List IC and master users"),
+        BotCommand("removeic",        "Revoke IC access from a user"),
+    ]
+    await app.bot.set_my_commands(public_commands)
+
+
 def main():
     db.init_db(MASTER_ID)
     logger.info("Database initialised. Master ID: %d", MASTER_ID)
@@ -2282,7 +2462,7 @@ def main():
     if purged:
         logger.info("Purged %d training record(s) older than 14 days.", purged)
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Reschedule reminders for any active training that survived a restart
     training = db.get_active_training()
@@ -2295,6 +2475,7 @@ def main():
 
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("help",        cmd_help))
+    app.add_handler(CommandHandler("ask",         cmd_ask))
     app.add_handler(CommandHandler("inventory",   cmd_inventory))
     app.add_handler(CommandHandler("whohas",      cmd_whohas))
     app.add_handler(CommandHandler("players",     cmd_players))
