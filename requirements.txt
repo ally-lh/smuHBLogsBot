@@ -3,3 +3,4 @@ python-dotenv
 groq
 gspread
 google-auth
+psycopg2-binary

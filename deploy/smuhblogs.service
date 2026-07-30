@@ -1,0 +1,22 @@
+[Unit]
+Description=SMU Handball Telegram logistics bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=smuhb
+WorkingDirectory=/opt/smuhblogs
+EnvironmentFile=/opt/smuhblogs/.env
+ExecStart=/opt/smuhblogs/.venv/bin/python /opt/smuhblogs/bot.py
+Restart=always
+RestartSec=5
+
+# Basic hardening while retaining write access to the SQLite data directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/smuhblogs/data
+
+[Install]
+WantedBy=multi-user.target

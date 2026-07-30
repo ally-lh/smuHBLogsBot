@@ -25,7 +25,37 @@ git remote add origin https://github.com/YOUR_USERNAME/smuHBLogs.git
 git push -u origin main
 ```
 
-### 3. Deploy to Railway
+### 3. Deploy
+
+This bot uses Telegram long polling, an in-process scheduler, and SQLite. It therefore needs an always-running process with persistent disk. The simplest AWS fit is a small EC2 instance; Lambda is not a drop-in deployment for the current architecture.
+
+#### AWS EC2 (simplest)
+
+New AWS accounts can use Free Tier credits for up to six months. This is not a permanent free host. On an Ubuntu EC2 instance:
+
+```bash
+sudo apt update
+sudo apt install -y git python3-venv
+git clone https://github.com/YOUR_USERNAME/smuHBLogs.git /opt/smuhblogs
+cd /opt/smuhblogs
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+sudo mkdir -p /opt/smuhblogs/data
+sudo chown ubuntu:ubuntu /opt/smuhblogs/data
+sudo cp deploy/smuhblogs.service /etc/systemd/system/
+```
+
+Now create `/opt/smuhblogs/.env` with the variables below, including `DB_PATH=/opt/smuhblogs/data/hblogs.db`. Edit `User=` in the service file if your Ubuntu username is not `ubuntu`, then start it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now smuhblogs
+sudo systemctl status smuhblogs
+```
+
+For a truly serverless AWS version, the bot would need to move from polling to a Telegram webhook (API Gateway + Lambda), replace SQLite with DynamoDB, and move the 3 PM job to EventBridge Scheduler. Lambda and EventBridge Scheduler have always-free monthly request allowances, but API Gateway's free allowance for new accounts is time-limited.
+
+#### Railway (alternative)
 
 1. Go to [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo**
 2. Select your `smuHBLogs` repo
@@ -74,7 +104,10 @@ Done. The bot knows who has what.
 ```
 /training 11/02/2026 jurong 7:30pm
 /required 10 balls, bibs, bands, tape bag, marker discs, tennis balls
+/reminderchat
 ```
+
+Run `/reminderchat` inside the destination Telegram group. The bot will post position-grouped attendance there at 3 PM SGT one day before the training date.
 
 **Attendance message comes in — reply to it:**
 
@@ -126,7 +159,7 @@ Bot outputs:
 | `/sheetattendance [DD/MM/YYYY]` | Pull attendance for a specific date |
 | `/required [items, ...]` | Set equipment needed for training |
 | `/delegate` | Generate equipment delegation plan |
-| `/reminderchat` | Redirect auto-reminders to current chat |
+| `/reminderchat` | Send reminders and day-before position attendance here |
 
 ### IC-only — Inventory
 
@@ -171,6 +204,8 @@ That's it. Old IC is removed, new IC is in. Master access is permanent and unaff
 ---
 
 ## Tips
+
+- **Automatic position attendance:** Create the training with `/training`, then run `/reminderchat` inside the destination group/channel. At 3:00 PM Singapore time on the day before training, the bot reads both Sheets tabs and posts the position-grouped attendance once. Add the bot to the chat and allow it to post messages.
 
 - **Item names must match** between `/setholding` and `/required`. Use consistent names (e.g. always `balls` not `ball` or `handball`). The bot matches by substring so `ball` will find `balls`.
 - **Training cancelled?** `/clear training` wipes it cleanly without touching inventory.

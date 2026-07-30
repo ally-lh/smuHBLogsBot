@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: smuhblogs
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      # Set in the Render dashboard (Environment tab):
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SHEET_ID
+        sync: false
+      - key: SHEET_CREDS
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: MASTER_ID
+        sync: false
+      - key: SHEET_NAME
+        value: Sheet1
+      - key: SHEET_POSNAME
+        value: sheet71

@@ -2,13 +2,13 @@
 
 ## After every code change, always update these two things
 
-### 1. `/help` command (`cmd_help` in bot.py, line ~328)
-- Add any new command to the correct section: **Anyone**, **Training**, **Inventory**, or **Admin**
+### 1. `/help` command (`cmd_help` in bot.py)
+- Add any new command to the correct section: **Anyone**, **Training**, or **Admin**
 - Remove or rename commands that are changed or deleted
 - Keep descriptions short (one line, action-oriented: what it does, not how it works)
 - IC-only commands go inside the `if is_ic:` block; master-only go inside `if role == "master":`
 
-### 2. The docstring at the top of `bot.py` (lines 1–31)
+### 2. The docstring at the top of `bot.py`
 - The `Commands` block at the top of the file is the developer-facing reference
 - Mirror any additions/removals from `/help` here too
 
@@ -17,7 +17,7 @@
 ## Command design rules
 
 **Check existing functions:**
-- If modified one function, ensure all related functions or similar functions are modified to use the new function properly, without error. Example, if /update is modified, /setholding should be do. `/attendance` and `/attendancepos` is another example.
+- If modified one function, ensure all related functions or similar functions are modified to use the new function properly, without error. Example: `/attendance` and `/attendancepos` share the sheet-picker flow.
 - always ensure all functions are working with every change
 
 **Be consistent with existing patterns:**
@@ -51,6 +51,12 @@
 | `SHEET_POSNAME`    | `sheet71`        | Tab name for the positions roster    |
 | `SHEET_CREDS`      | `service_account.json` | Path or raw JSON for GCP creds |
 | `GROQ_API_KEY`     | —                | Optional: Groq AI key                |
+| `DATABASE_URL`     | —                | Postgres URI (Supabase); when set, used instead of SQLite |
+| `DB_PATH`          | `hblogs.db`      | SQLite file path (local dev only)    |
+| `PORT`             | —                | If set, serves an HTTP health endpoint (Render/uptime pings) |
+
+Storage backend: `database.py` uses Postgres when `DATABASE_URL` is set, SQLite otherwise.
+Deployment: see `deploy/DEPLOY.md` (Render free tier + Supabase + UptimeRobot).
 
 ---
 
@@ -85,31 +91,20 @@ Display labels:  `Keeper`,     `Pivots`, `CBs`, `Wings`
 - `/start` — welcome message + status
 - `/attendance` — pick from upcoming sessions (view attendance)
 - `/attendancepos` — same as /attendance but grouped by position
-- `/inventory [item?]` — view all holdings or search by item
-- `/whohas [name]` — see what someone holds
-- `/players` — list all player names currently in the DB
 - `/acceptic` — accept a pending IC handover
-- `/update [name] [qty?] [item], ...` — bulk inventory update
-- `/ask [question]` — ask a question about commands or logistics
+- `/ask [question]` — ask a question about commands or attendance
 - `/help` — this list
 
 ### IC-only (Training)
 - `/training [DD/MM/YYYY] [venue] [time]` — manually create a training session (optional)
 - `/sheetattendance [DD/MM/YYYY]` — pull attendance for a specific date
-- `/required [items, ...]` — set equipment needed
-- `/delegate` — generate equipment delegation plan + copy-paste message
 - `/reminderchat` — redirect auto-reminders to current chat
-
-### IC-only (Inventory)
-- `/setholding [name] [qty?] [item]` — assign item
-- `/removeitem [name] [item]` — remove item
-- `/rename [old] to [new]` — rename a holder
-- `/transfer [item] from [name] to [name]` — move item
+- Forwarding an `Attendance DD/MM/YY` message to the bot auto-creates a training + attendance
 
 ### IC-only (Admin)
 - `/alias [sheet_name] as [display_name]` — map a sheet name to a display name; `/alias` alone lists all
 - `/unalias [sheet_name]` — remove a name alias
-- `/clear training|inventory|all` — wipe data
+- `/clear training` — cancel the current training
 - `/handover @username` — hand over IC role
 - `/listic` — list IC/master users
 
