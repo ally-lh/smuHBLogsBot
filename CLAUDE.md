@@ -22,7 +22,7 @@
 
 **Be consistent with existing patterns:**
 - Commands that read from Google Sheets show a date-picker keyboard (3 upcoming sessions as buttons)
-- Callback data prefixes must be unique: `att_pick_`, `attpos_pick_`, `clear_`, etc.
+- Callback data prefixes must be unique: `att_pick_`, `attpos_pick_`, `clear_`, `blast_pick_`, `blast_type_`, etc.
 - IC-only commands use the `@ic_only` decorator
 - Master-only commands check `role == "master"` inside the handler
 
@@ -54,7 +54,7 @@
 | `DATABASE_URL`     | —                | Postgres URI (Supabase); when set, used instead of SQLite |
 | `DB_PATH`          | `hblogs.db`      | SQLite file path (local dev only)    |
 | `PORT`             | —                | If set, serves an HTTP health endpoint (Render/uptime pings) |
-| `ATTENDANCE_POST_HOUR` | `16`         | Hour (SGT, 0-23) of the daily day-before attendance post |
+| `ATTENDANCE_POST_TIME` | `15:00`      | Time (SGT, 24h HH:MM) of the daily day-before attendance post |
 
 Storage backend: `database.py` uses Postgres when `DATABASE_URL` is set, SQLite otherwise.
 Deployment: see `deploy/DEPLOY.md` (Render free tier + Supabase + UptimeRobot).
@@ -102,6 +102,9 @@ Rows named `Total` are ignored in both the roster and the attendance tab.
 - `/training [DD/MM/YYYY] [venue] [time]` — manually create a training session (optional)
 - `/sheetattendance [DD/MM/YYYY]` — pull attendance for a specific date
 - `/reminderchat [@channel | -100id]` — redirect auto-reminders + day-before attendance post to the current chat, or to a channel by reference (from a PM); also works posted directly in a channel the bot administers
+- `/blast` — two-step picker (session → normal/position-grouped), then sends that attendance message to the reminder chat immediately; ignores the once-only marker and scheduled time
+
+**Auto-post behaviour:** daily at `ATTENDANCE_POST_TIME` SGT, the bot checks the sheet for a session dated tomorrow. If found, it auto-creates the training record (no manual `/training` needed) and posts position-grouped attendance to the default reminder chat (`settings.reminder_chat`, set by `/reminderchat`). The `attendance_pos_sent_at` marker ensures it posts once per training.
 - Forwarding an `Attendance DD/MM/YY` message to the bot auto-creates a training + attendance
 
 ### IC-only (Admin)

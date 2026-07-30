@@ -81,6 +81,11 @@ _SCHEMA_SQLITE = """
         sheet_name   TEXT PRIMARY KEY COLLATE NOCASE,
         display_name TEXT NOT NULL COLLATE NOCASE
     );
+
+    CREATE TABLE IF NOT EXISTS settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
 """
 
 # BIGINT for Telegram user/chat ids — they exceed 32-bit integer range.
@@ -120,6 +125,11 @@ _SCHEMA_PG = """
     CREATE TABLE IF NOT EXISTS name_aliases (
         sheet_name   TEXT PRIMARY KEY,
         display_name TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
     );
 """
 
@@ -402,6 +412,32 @@ def get_all_name_aliases() -> dict[str, str]:
     rows = _exec(conn, "SELECT sheet_name, display_name FROM name_aliases").fetchall()
     conn.close()
     return {r["sheet_name"]: r["display_name"] for r in rows}
+
+
+# ──────────────────────────────────────────────────────────────
+# SETTINGS
+# ──────────────────────────────────────────────────────────────
+
+def set_setting(key: str, value: str) -> None:
+    """Store a key/value setting (e.g. the default reminder chat id)."""
+    conn = get_conn()
+    if _PG:
+        sql = (
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+        )
+    else:
+        sql = "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)"
+    _exec(conn, sql, (key, value))
+    conn.commit()
+    conn.close()
+
+
+def get_setting(key: str) -> Optional[str]:
+    conn = get_conn()
+    row = _exec(conn, "SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    return row["value"] if row else None
 
 
 def clear_active_training() -> bool:

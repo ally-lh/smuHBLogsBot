@@ -20,6 +20,7 @@ IC-only:
   /clear training
   /handover @username
   /reminderchat [@channel | -100id]     ← send reminders and day-before attendance here or to a channel
+  /blast                                ← pick session + type, send attendance to the reminder chat now
   /listic
 
 Master-only:
@@ -60,10 +61,14 @@ SHEET_NAME           = os.getenv("SHEET_NAME", "Sheet1")
 SHEET_POSITIONS_NAME = os.getenv("SHEET_POSNAME", "sheet71")
 SHEET_CREDS          = os.getenv("SHEET_CREDS", "service_account.json")
 
-# Hour (SGT, 0-23) of the daily day-before-training attendance post
-ATTENDANCE_POST_HOUR = int(os.getenv("ATTENDANCE_POST_HOUR", "16"))
-if not 0 <= ATTENDANCE_POST_HOUR <= 23:
-    raise RuntimeError(f"ATTENDANCE_POST_HOUR must be 0-23, got {ATTENDANCE_POST_HOUR}")
+# Time (SGT, 24h "HH:MM") of the daily day-before-training attendance post
+ATTENDANCE_POST_TIME = os.getenv("ATTENDANCE_POST_TIME", "15:00")
+try:
+    ATTENDANCE_POST_HOUR, ATTENDANCE_POST_MINUTE = (int(p) for p in ATTENDANCE_POST_TIME.split(":"))
+    if not (0 <= ATTENDANCE_POST_HOUR <= 23 and 0 <= ATTENDANCE_POST_MINUTE <= 59):
+        raise ValueError
+except ValueError:
+    raise RuntimeError(f"ATTENDANCE_POST_TIME must be HH:MM (24h), got {ATTENDANCE_POST_TIME!r}")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set.")
@@ -295,6 +300,7 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
             "/training [DD/MM/YYYY] [venue] [time] — manually create a training session",
             "/sheetattendance [DD/MM/YYYY] — pull attendance for a specific date",
             "/reminderchat [@channel?] — send reminders + day-before attendance here (or to a channel)",
+        "/blast — pick a session + message type, send it to the reminder chat now",
             "",
             "<b>Admin:</b>",
             "/alias [sheet_name] as [display_name] — map a sheet name to a display name",
@@ -766,14 +772,6 @@ async def cmd_reminderchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("🔒 IC or master access required.")
         return
 
-    training = db.get_active_training()
-    if not training:
-        await msg.reply_text(
-            "❌ No active training. Create one with `/training` first.",
-            parse_mode="Markdown",
-        )
-        return
-
     chat_id = chat.id
     if context.args:
         ref = context.args[0]
@@ -794,8 +792,26 @@ async def cmd_reminderchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    db.set_training_reminder_chat(training["id"], chat_id)
-    n = _schedule_training_reminders(context.application, training["id"], training["date"], chat_id)
+    # Save globally — the daily auto-post uses this even when no training
+    # record exists yet (it creates one from the sheet the day before).
+    db.set_setting("reminder_chat", str(chat_id))
+
+    training_row = db.get_active_training()
+    if training_row:
+        training = dict(training_row)
+        db.set_training_reminder_chat(training["id"], chat_id)
+        n = _schedule_training_reminders(context.application, training["id"], training["date"], chat_id)
+        note = (
+            f"Prep reminder rescheduled for 9 AM the day before {training['date']}."
+            if n else
+            f"The 9 AM day-before prep reminder for {training['date']} has already passed — "
+            f"attendance posts will still be sent here (use /blast to send one now)."
+        )
+    else:
+        note = (
+            "Saved as the default destination — day-before attendance posts "
+            "will be sent here automatically."
+        )
 
     if chat_id != chat.id:
         # Prove the bot can post in the target chat before claiming success.
@@ -812,15 +828,13 @@ async def cmd_reminderchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         await msg.reply_text(
-            f"🔔 *Reminders redirected!* Check the channel for a confirmation message.\n"
-            f"{n} reminder(s) rescheduled for training on {training['date']}.",
+            f"🔔 *Reminders redirected!* Check the channel for a confirmation message.\n{note}",
             parse_mode="Markdown",
         )
         return
 
     await msg.reply_text(
-        f"🔔 *Reminders redirected to this chat!*\n"
-        f"{n} reminder(s) rescheduled for training on {training['date']}.",
+        f"🔔 *Reminders redirected to this chat!*\n{note}",
         parse_mode="Markdown",
     )
 
@@ -1277,65 +1291,242 @@ async def _sheet_poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _auto_attendance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Run daily at ATTENDANCE_POST_HOUR SGT and, when training is tomorrow, post
+    Run daily at ATTENDANCE_POST_TIME SGT and, when training is tomorrow, post
     attendance grouped by position to the configured reminder chat exactly once.
     """
     if not _sheets_enabled:
         return
 
-    # Don't fire before the scheduled hour — the startup catch-up run would
+    # Don't fire before the scheduled time — the startup catch-up run would
     # otherwise post early after every deploy/restart.
-    if datetime.now(SGT).hour < ATTENDANCE_POST_HOUR:
+    now_sgt = datetime.now(SGT)
+    if (now_sgt.hour, now_sgt.minute) < (ATTENDANCE_POST_HOUR, ATTENDANCE_POST_MINUTE):
         return
 
-    training_row = db.get_active_training()
-    if not training_row:
+    tomorrow = datetime.now(SGT).date() + timedelta(days=1)
+    date_str = tomorrow.strftime("%d/%m/%Y")
+
+    training_row = db.get_training_by_date(date_str)
+    training = dict(training_row) if training_row else None
+
+    if training and training.get("attendance_pos_sent_at"):
+        return  # already posted for tomorrow
+
+    if not training:
+        # No DB record yet — look for tomorrow's session in the sheet and
+        # create one, so the post goes out without any manual setup.
+        default_chat = _default_reminder_chat()
+        if not default_chat:
+            return  # nowhere to post; /reminderchat has never been run
+        try:
+            sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, tomorrow)
+        except Exception as e:
+            logger.warning("Auto-attendance sheet check failed: %s", e)
+            return
+        if sheet_data is None:
+            return  # no session scheduled tomorrow
+        db.create_training(
+            date_str,
+            sheet_data.get("venue") or "TBC",
+            sheet_data.get("time") or "TBC",
+            reminder_chat_id=default_chat,
+        )
+        training = dict(db.get_training_by_date(date_str))
+        logger.info("Auto-created training for %s from the sheet.", date_str)
+
+    ok, detail = await _send_attendancepos_post(context.bot, training)
+    if not ok:
+        logger.info("Auto-attendance skipped: %s", detail)
         return
-    training = dict(training_row)
-    if not training.get("reminder_chat_id") or training.get("attendance_pos_sent_at"):
-        return
+
+    db.mark_attendance_pos_sent(training["id"])
+    logger.info("Posted day-before position attendance for training #%s", training["id"])
+
+
+def _default_reminder_chat() -> Optional[int]:
+    """The globally configured reminder chat id (set by /reminderchat), if any."""
+    val = db.get_setting("reminder_chat")
+    try:
+        return int(val) if val else None
+    except ValueError:
+        logger.error("Invalid reminder_chat setting: %r", val)
+        return None
+
+
+async def _send_attendancepos_post(bot_obj, training: dict) -> tuple[bool, str]:
+    """
+    Fetch sheet attendance for the training's date and post the
+    position-grouped message to its reminder chat (falling back to the
+    global default). Returns (ok, failure_reason). Used by the daily job.
+    """
+    chat_id = training.get("reminder_chat_id") or _default_reminder_chat()
+    if not chat_id:
+        return False, "no reminder chat set — run /reminderchat first"
 
     try:
         training_date = datetime.strptime(training["date"], "%d/%m/%Y").date()
     except ValueError:
-        return
-
-    tomorrow = datetime.now(SGT).date() + timedelta(days=1)
-    if training_date != tomorrow:
-        return
-
-    chat_id = training["reminder_chat_id"]
+        return False, f"couldn't parse training date {training['date']!r}"
 
     try:
         sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, training_date)
     except Exception as e:
-        logger.warning("Auto-attendance sheet fetch failed: %s", e)
-        return
-
+        logger.error("Attendance post: sheet fetch failed: %s", e)
+        return False, f"couldn't read sheet: {e}"
     if sheet_data is None:
-        return
+        return False, f"no column for {training['date']} in the sheet"
 
     if not any(
         parsed.get("status") in ("present", "late")
         for parsed in sheet_data["attendance"].values()
     ):
-        logger.info("Auto-attendance skipped: nobody marked as attending on %s", training_date)
-        return
+        return False, f"nobody is marked as coming on {training['date']} yet"
 
     try:
         positions = _sheets.get_positions(SHEET_ID, SHEET_POSITIONS_NAME, SHEET_CREDS)
     except Exception as e:
-        logger.warning("Auto-attendance positions fetch failed: %s", e)
+        logger.warning("Attendance post: positions fetch failed: %s", e)
         positions = {}
 
     try:
-        await context.bot.send_message(chat_id=chat_id, text=_build_attendancepos_msg(sheet_data, positions))
+        await bot_obj.send_message(chat_id=chat_id, text=_build_attendancepos_msg(sheet_data, positions))
     except Exception as e:
-        logger.warning("Auto-attendance position post failed: %s", e)
+        logger.error("Attendance post to chat %s failed: %s", chat_id, e)
+        return False, f"couldn't post to the reminder chat: {e}"
+    return True, ""
+
+
+@ic_only
+async def cmd_blast(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    """
+    Manually send an attendance message to the reminder chat/channel.
+    Step 1: pick which upcoming session. Step 2: pick the message type.
+    """
+    if not _sheets_enabled:
+        await update.message.reply_text("❌ Google Sheets integration is not enabled.")
+        return
+    if not _default_reminder_chat() and not db.get_active_training():
+        await update.message.reply_text(
+            "❌ No reminder chat set. Run `/reminderchat` in the channel "
+            "(or `/reminderchat @channel` here) first.",
+            parse_mode="Markdown",
+        )
         return
 
-    db.mark_attendance_pos_sent(training["id"])
-    logger.info("Posted day-before position attendance for training #%s", training["id"])
+    try:
+        sessions = _sheets.get_upcoming_sessions(SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=3)
+    except Exception as e:
+        logger.error("Sheet session fetch error in /blast: %s", e)
+        await update.message.reply_text(f"❌ Couldn't read sheet: {e}")
+        return
+    if not sessions:
+        await update.message.reply_text("❌ No upcoming training sessions found in the sheet.")
+        return
+
+    keyboard = []
+    for s in sessions:
+        label         = s["date"].strftime("%-d %b") + f"  ·  {s['venue']}  ·  {s['time']}"
+        callback_data = f"blast_pick_{s['date'].strftime('%d%m%Y')}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=callback_data)])
+
+    await update.message.reply_text(
+        "Which training do you want to blast?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def callback_blast_pick(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    """Step 2 of /blast: choose the message type for the picked date."""
+    query = update.callback_query
+    if not db.is_ic_or_master(query.from_user.id):
+        await query.answer("🔒 IC or master access required.", show_alert=True)
+        return
+    await query.answer()
+
+    date_str = query.data.replace("blast_pick_", "")  # DDMMYYYY
+    keyboard = [[
+        InlineKeyboardButton("📋 Normal",      callback_data=f"blast_type_{date_str}_norm"),
+        InlineKeyboardButton("🧩 By position", callback_data=f"blast_type_{date_str}_pos"),
+    ]]
+    await query.edit_message_text(
+        "What type of attendance message?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def callback_blast_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Final step of /blast: build the chosen message and send it to the reminder chat."""
+    query = update.callback_query
+    if not db.is_ic_or_master(query.from_user.id):
+        await query.answer("🔒 IC or master access required.", show_alert=True)
+        return
+    await query.answer()
+
+    m = re.match(r"^blast_type_(\d{8})_(norm|pos)$", query.data)
+    if not m:
+        await query.edit_message_text("❌ Invalid selection.")
+        return
+    try:
+        target_date = datetime.strptime(m.group(1), "%d%m%Y").date()
+    except ValueError:
+        await query.edit_message_text("❌ Invalid date.")
+        return
+    msg_type = m.group(2)
+
+    date_for_db  = target_date.strftime("%d/%m/%Y")
+    training_row = db.get_training_by_date(date_for_db)
+    training     = dict(training_row) if training_row else None
+    chat_id      = (training or {}).get("reminder_chat_id") or _default_reminder_chat()
+    if not chat_id:
+        await query.edit_message_text(
+            "❌ No reminder chat set. Run /reminderchat in the channel "
+            "(or /reminderchat @channel here) first."
+        )
+        return
+
+    await query.edit_message_text(f"⏳ Fetching sheet for {target_date.strftime('%-d %b %Y')}…")
+    try:
+        sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, target_date)
+    except Exception as e:
+        logger.error("Sheet fetch error in blast_type: %s", e)
+        await query.edit_message_text(f"❌ Couldn't read sheet: {e}")
+        return
+    if sheet_data is None:
+        await query.edit_message_text(
+            f"❌ No column for {target_date.strftime('%-d %b %Y')} found in the sheet."
+        )
+        return
+    if not any(
+        p.get("status") in ("present", "late")
+        for p in sheet_data["attendance"].values()
+    ):
+        await query.edit_message_text("❌ Nobody is marked as coming in the sheet yet.")
+        return
+
+    try:
+        if msg_type == "pos":
+            try:
+                positions = _sheets.get_positions(SHEET_ID, SHEET_POSITIONS_NAME, SHEET_CREDS)
+            except Exception as e:
+                logger.warning("Blast: positions fetch failed: %s", e)
+                positions = {}
+            out_msg = _build_attendancepos_msg(sheet_data, positions)
+        else:
+            out_msg, _ = _build_attendance_msgs(sheet_data, training)
+
+        await context.bot.send_message(chat_id=chat_id, text=out_msg)
+    except Exception as e:
+        logger.error("Blast post to chat %s failed: %s", chat_id, e, exc_info=True)
+        await query.edit_message_text(
+            f"❌ Couldn't post to the reminder chat: {e}\n"
+            "Make sure the bot is an admin there."
+        )
+        return
+
+    type_label = "position-grouped" if msg_type == "pos" else "normal"
+    await query.edit_message_text(
+        f"✅ Sent the {type_label} attendance for {date_for_db} to the reminder chat."
+    )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1427,6 +1618,7 @@ async def post_init(app):
         BotCommand("sheetattendance", "Pull attendance for a specific date"),
         BotCommand("training",        "Manually create a training session"),
         BotCommand("reminderchat",    "Redirect auto-reminders to this chat"),
+        BotCommand("blast",           "Send the attendance post to the channel now"),
         BotCommand("acceptic",        "Accept a pending IC handover"),
         BotCommand("alias",           "Map a sheet name to a display name"),
         BotCommand("unalias",         "Remove a name alias"),
@@ -1476,6 +1668,9 @@ def main():
         "reminderchat", cmd_reminderchat,
         filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POST,
     ))
+    app.add_handler(CommandHandler("blast",             cmd_blast))
+    app.add_handler(CallbackQueryHandler(callback_blast_pick, pattern="^blast_pick_"))
+    app.add_handler(CallbackQueryHandler(callback_blast_type, pattern="^blast_type_"))
     app.add_handler(CommandHandler("listic",            cmd_listic))
     app.add_handler(CommandHandler("handover",          cmd_handover))
     app.add_handler(CommandHandler("removeic",          cmd_removeic))
@@ -1491,7 +1686,9 @@ def main():
 
         # Auto-attendance: position-grouped post the day before training.
         now_sgt     = datetime.now(SGT)
-        target_post = now_sgt.replace(hour=ATTENDANCE_POST_HOUR, minute=0, second=0, microsecond=0)
+        target_post = now_sgt.replace(
+            hour=ATTENDANCE_POST_HOUR, minute=ATTENDANCE_POST_MINUTE, second=0, microsecond=0
+        )
         if target_post <= now_sgt:
             target_post += timedelta(days=1)
         seconds_until = (target_post - now_sgt).total_seconds()
@@ -1501,10 +1698,13 @@ def main():
             first=seconds_until,
         )
         # Catch up safely after a restart during the day-before window. The DB
-        # sent marker and the in-job hour gate make this a no-op if the post
-        # already ran or the scheduled hour hasn't arrived yet.
+        # sent marker and the in-job time gate make this a no-op if the post
+        # already ran or the scheduled time hasn't arrived yet.
         app.job_queue.run_once(_auto_attendance_job, when=10)
-        logger.info("Auto-attendance job scheduled (daily at %02d:00 SGT).", ATTENDANCE_POST_HOUR)
+        logger.info(
+            "Auto-attendance job scheduled (daily at %02d:%02d SGT).",
+            ATTENDANCE_POST_HOUR, ATTENDANCE_POST_MINUTE,
+        )
 
     # Open the health endpoint when PORT is set (Render web service + keep-alive pings)
     start_health_server()
