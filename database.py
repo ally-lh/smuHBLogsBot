@@ -287,6 +287,18 @@ def get_training_by_date(date_str: str) -> Optional[Row]:
     return row
 
 
+def has_cleared_training(date_str: str) -> bool:
+    """True if a training on this date was explicitly cancelled via /clear."""
+    conn = get_conn()
+    row = _exec(
+        conn,
+        "SELECT id FROM training WHERE date = ? AND status = 'cleared' LIMIT 1",
+        (date_str,),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
 def create_training(date: str, venue: str, report_time: str, reminder_chat_id: int = None) -> int:
     conn = get_conn()
     sql = "INSERT INTO training (date, venue, report_time, reminder_chat_id) VALUES (?, ?, ?, ?)"

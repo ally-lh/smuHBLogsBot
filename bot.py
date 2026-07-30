@@ -728,7 +728,9 @@ async def callback_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cleared = db.clear_active_training()
     await query.edit_message_text(
-        "🗑️ Current training cleared." if cleared else "❌ No active training to clear."
+        "🗑️ Current training cleared. Auto-posts and IC reminders for that date are cancelled too "
+        "(recreate it with /training or /attendance if needed)."
+        if cleared else "❌ No active training to clear."
     )
 
 
@@ -1145,6 +1147,8 @@ async def _auto_attendance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return  # already posted for tomorrow
 
     if not training:
+        if db.has_cleared_training(date_str):
+            return  # training was cancelled via /clear — stay silent
         # No DB record yet — look for tomorrow's session in the sheet and
         # create one, so the post goes out without any manual setup.
         default_chat = _default_reminder_chat()
@@ -1242,16 +1246,23 @@ async def _ic_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     training_row = db.get_training_by_date(date_str)
+    if not training_row and db.has_cleared_training(date_str):
+        return  # training was cancelled via /clear — stay silent
+
+    # The sheet is the source of truth: even with a DB record, no column for
+    # tomorrow means the session was removed/cancelled — and the auto-post
+    # this reminder announces couldn't run without the sheet either.
+    try:
+        sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, tomorrow)
+    except Exception as e:
+        logger.warning("IC reminder sheet check failed: %s", e)
+        return
+    if sheet_data is None:
+        return  # no session in the sheet tomorrow
+
     if training_row:
         venue, time_str = training_row["venue"], training_row["report_time"]
     else:
-        try:
-            sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, tomorrow)
-        except Exception as e:
-            logger.warning("IC reminder sheet check failed: %s", e)
-            return
-        if sheet_data is None:
-            return  # no training tomorrow
         venue, time_str = sheet_data.get("venue"), sheet_data.get("time")
 
     auth_rows = db.list_auth()

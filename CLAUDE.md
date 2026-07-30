@@ -106,6 +106,8 @@ Rows named `Total` are ignored in both the roster and the attendance tab.
 **Auto-post behaviour:** daily at `ATTENDANCE_POST_TIME` SGT, the bot checks the sheet for a session dated tomorrow. If found, it auto-creates the training record (no manual `/training` needed) and posts the **normal attendance message** to the default reminder chat (`settings.reminder_chat`, set by `/reminderchat`). The `attendance_pos_sent_at` marker ensures it posts once per training. Position-grouped posts are available manually via `/blast` or `/attendancepos`.
 
 **IC heads-up:** daily at `IC_REMINDER_TIME` SGT (default 09:00), when training is tomorrow, the bot DMs every `ic`-role user (master if none) a reminder that the auto-post is coming, once per day (`settings.ic_reminder_sent_for` marker). There is no channel prep reminder — that was removed in favour of these DMs.
+
+**Cancellation semantics (both daily jobs):** the sheet is the source of truth — if there's no column for tomorrow, nothing is sent even when a DB training record exists. A training cleared via `/clear` leaves a `status='cleared'` row that also suppresses auto-creation/posting for that date, even if the sheet still has the column.
 - Forwarding an `Attendance DD/MM/YY` message to the bot auto-creates a training + attendance
 
 ### IC-only (Admin)
