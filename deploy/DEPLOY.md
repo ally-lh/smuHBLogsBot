@@ -41,7 +41,6 @@ is needed for any of the three services.
    | `SHEET_NAME`   | attendance tab name                                     |
    | `SHEET_POSNAME`| positions tab name                                      |
    | `SHEET_CREDS`  | **paste the full service-account JSON as the value**    |
-   | `GROQ_API_KEY` | (optional) for /ask                                     |
    | `MASTER_ID`    | your Telegram user ID                                   |
 
    `SHEET_CREDS` takes raw JSON on Render — there's no file on disk.

@@ -10,7 +10,6 @@ Public (anyone can DM the bot):
   /attendance                           ← pick session from sheet; view attendance
   /attendancepos                        ← attendance grouped by position (reads sheet71)
   /acceptic            — accept a pending IC handover
-  /ask [question]      — ask the bot a question about commands or attendance
 
 IC-only:
   /training [DD/MM/YYYY] [venue] [time] ← optional: manually create training
@@ -29,12 +28,10 @@ Master-only:
 
 import os
 import re
-import time
 import logging
 from datetime import datetime, date, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
-from collections import defaultdict, deque
 from dotenv import load_dotenv
 load_dotenv()
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -55,20 +52,30 @@ logger = logging.getLogger(__name__)
 
 MASTER_ID    = int(os.getenv("MASTER_ID", "605114234"))
 BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 SHEET_ID             = os.getenv("SHEET_ID", "")
 SHEET_NAME           = os.getenv("SHEET_NAME", "Sheet1")
 SHEET_POSITIONS_NAME = os.getenv("SHEET_POSNAME", "sheet71")
 SHEET_CREDS          = os.getenv("SHEET_CREDS", "service_account.json")
 
-# Time (SGT, 24h "HH:MM") of the daily day-before-training attendance post
-ATTENDANCE_POST_TIME = os.getenv("ATTENDANCE_POST_TIME", "15:00")
-try:
-    ATTENDANCE_POST_HOUR, ATTENDANCE_POST_MINUTE = (int(p) for p in ATTENDANCE_POST_TIME.split(":"))
-    if not (0 <= ATTENDANCE_POST_HOUR <= 23 and 0 <= ATTENDANCE_POST_MINUTE <= 59):
-        raise ValueError
-except ValueError:
-    raise RuntimeError(f"ATTENDANCE_POST_TIME must be HH:MM (24h), got {ATTENDANCE_POST_TIME!r}")
+SGT = ZoneInfo("Asia/Singapore")
+
+
+def _parse_hhmm(env_key: str, default: str) -> tuple[int, int]:
+    """Read an HH:MM (24h) time from the environment, failing fast if invalid."""
+    raw = os.getenv(env_key, default)
+    try:
+        hour, minute = (int(p) for p in raw.split(":"))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except ValueError:
+        raise RuntimeError(f"{env_key} must be HH:MM (24h), got {raw!r}")
+    return hour, minute
+
+
+# Daily job times (SGT), both firing the day before a training:
+# the attendance post to the reminder chat, and the heads-up DM to ICs.
+ATTENDANCE_POST_HOUR, ATTENDANCE_POST_MINUTE = _parse_hhmm("ATTENDANCE_POST_TIME", "15:00")
+IC_REMINDER_HOUR, IC_REMINDER_MINUTE         = _parse_hhmm("IC_REMINDER_TIME", "09:00")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set.")
@@ -84,26 +91,6 @@ else:
 # Polling state — tracks the last seen attendance column so we can diff on changes
 _last_sheet_hash: Optional[str] = None   # None = not yet initialised
 _last_sheet_data: dict = {}
-
-from groq import Groq
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-
-# Rate limit: max 5 Groq calls per user per 60 seconds
-_GROQ_RATE_LIMIT = 5
-_GROQ_RATE_WINDOW = 60
-_groq_calls: dict[int, deque] = defaultdict(deque)
-
-def _check_groq_rate_limit(user_id: int) -> bool:
-    """Returns True if the user is allowed to make a Groq call, False if rate-limited."""
-    now = time.monotonic()
-    q = _groq_calls[user_id]
-    while q and now - q[0] > _GROQ_RATE_WINDOW:
-        q.popleft()
-    if len(q) >= _GROQ_RATE_LIMIT:
-        return False
-    q.append(now)
-    return True
-
 
 # ──────────────────────────────────────────────────────────────
 # PARSE HELPERS
@@ -290,7 +277,6 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         "/attendance — pick from upcoming sessions (view attendance)",
         "/attendancepos — same as /attendance but grouped by position",
         "/acceptic — accept a pending IC handover",
-        "/ask [question] — ask a question about commands or attendance",
     ]
 
     if is_ic:
@@ -312,7 +298,6 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         if role == "master":
             lines.append("/removeic @username — revoke IC access")
 
-    lines += ["", "💬 <i>Got a question? /ask [question]</i>"]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -334,22 +319,16 @@ async def cmd_training(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id         = update.effective_chat.id
     tid             = db.create_training(date_str, venue, time_str, reminder_chat_id=chat_id)
 
-    n = _schedule_training_reminders(context.application, tid, date_str, chat_id)
-    reminder_note = (
-        "\n\n🔔 *Reminder set* — I'll ping you the day before training."
-        if n > 0 else
-        "\n\n⚠️ No reminder scheduled (training may be tomorrow or already past)."
-    )
-
     await update.message.reply_text(
         f"📅 *Training created (#{tid})*\n"
         f"• Date: {date_str}\n"
         f"• Venue: {venue.upper()}\n"
         f"• Time: {time_str}\n\n"
         f"*Next step:* reply to the attendance message with `/attendance`, "
-        f"or run `/attendance` to pick a session from the sheet."
-        f"{reminder_note}\n\n"
-        f"_Use /reminderchat in a group to redirect reminders there instead._",
+        f"or run `/attendance` to pick a session from the sheet.\n\n"
+        f"_The attendance list is auto-posted to the reminder chat at "
+        f"{ATTENDANCE_POST_HOUR:02d}:{ATTENDANCE_POST_MINUTE:02d} the day before "
+        f"(set the destination with /reminderchat)._",
         parse_mode="Markdown",
     )
 
@@ -467,7 +446,7 @@ async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-async def callback_attendance_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_attendance_pick(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     """Handle training date selection from /attendance inline keyboard."""
     query = update.callback_query
     await query.answer()
@@ -504,8 +483,7 @@ async def callback_attendance_pick(update: Update, context: ContextTypes.DEFAULT
             venue    = sheet_data.get("venue") or "TBC"
             time_str = sheet_data.get("time") or "TBC"
             chat_id  = query.message.chat_id
-            tid = db.create_training(date_for_db, venue, time_str, reminder_chat_id=chat_id)
-            _schedule_training_reminders(context.application, tid, date_for_db, chat_id)
+            db.create_training(date_for_db, venue, time_str, reminder_chat_id=chat_id)
             row = db.get_training_by_date(date_for_db)
             matched_training = dict(row) if row else None
 
@@ -798,20 +776,11 @@ async def cmd_reminderchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     training_row = db.get_active_training()
     if training_row:
-        training = dict(training_row)
-        db.set_training_reminder_chat(training["id"], chat_id)
-        n = _schedule_training_reminders(context.application, training["id"], training["date"], chat_id)
-        note = (
-            f"Prep reminder rescheduled for 9 AM the day before {training['date']}."
-            if n else
-            f"The 9 AM day-before prep reminder for {training['date']} has already passed — "
-            f"attendance posts will still be sent here (use /blast to send one now)."
-        )
-    else:
-        note = (
-            "Saved as the default destination — day-before attendance posts "
-            "will be sent here automatically."
-        )
+        db.set_training_reminder_chat(training_row["id"], chat_id)
+    note = (
+        "Day-before attendance posts will be sent here automatically "
+        "(use /blast to send one now)."
+    )
 
     if chat_id != chat.id:
         # Prove the bot can post in the target chat before claiming success.
@@ -927,143 +896,6 @@ async def cmd_removeic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ *@{username}* not found in IC list.",
             parse_mode="Markdown",
         )
-
-
-# ──────────────────────────────────────────────────────────────
-# AI — HELP ASSISTANT
-# ──────────────────────────────────────────────────────────────
-
-_HELP_SYSTEM_PROMPT = """\
-You are a concise assistant for a Telegram handball attendance bot (smuHBLogs).
-
-Your ONLY purpose is to help users understand and use bot commands for training attendance.
-
-----------------------------------------
-SCOPE RULES
-----------------------------------------
-You may ONLY:
-- Explain bot commands
-- Help users choose the correct command
-- Clarify attendance workflows (viewing attendance, training sessions, name aliases, IC handover)
-
-If a message is unrelated to bot usage or team attendance, reply EXACTLY:
-"I can only help with bot commands and team attendance. Try /help for the full list."
-
-----------------------------------------
-BEHAVIOUR RULES
-----------------------------------------
-- Be concise. Max 1–3 short sentences unless listing commands
-- Do NOT explain internal logic, database, or system design
-- Do NOT guess missing information — ask a short clarifying question instead
-- Do NOT invent commands
-- Only use commands from the list below
-- If user intent is unclear → suggest closest valid command
-
-----------------------------------------
-COMMAND RULES
-----------------------------------------
-
-Commands (anyone):
-/attendance
-/attendancepos
-/acceptic
-/ask [question]
-
-Commands (IC only):
-/training
-/sheetattendance
-/reminderchat
-/alias
-/unalias
-/clear
-/handover
-/listic
-
-Commands (master only):
-/removeic
-
-----------------------------------------
-RESPONSE PATTERNS
-----------------------------------------
-
-1. If user asks "what do I do":
-→ Suggest ONE best command
-Example:
-"Use /attendance to view attendance for an upcoming session."
-
-2. If attendance-related:
-→ Suggest /attendance, /attendancepos, or /sheetattendance
-
-3. If a sheet name shows up wrongly in messages:
-→ Suggest /alias
-Example:
-"Use /alias szehan as saan"
-
-4. If handover-related:
-→ Suggest /handover (current IC) and /acceptic (new IC)
-
-5. If missing info:
-→ Ask ONE short clarifying question
-Example:
-"Which training is this for?"
-
-----------------------------------------
-STYLE
-----------------------------------------
-- Direct, no fluff
-- No emojis unless user uses them first
-- No long explanations
-- Prefer command-first answers
-
-----------------------------------------
-FAILSAFE
-----------------------------------------
-If unsure:
-→ Suggest /help OR the closest matching command"""
-
-async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: `/ask [your question]`\nExample: `/ask how do I transfer an item?`", parse_mode="Markdown")
-        return
-    if not groq_client:
-        await update.message.reply_text("❌ AI not configured (GROQ_API_KEY missing).")
-        return
-    if not _check_groq_rate_limit(update.effective_user.id):
-        await update.message.reply_text("⏳ Slow down — max 5 questions per minute.")
-        return
-
-    role   = db.get_role(update.effective_user.id) or "viewer"
-    is_ic  = role in ("ic", "master")
-    if role == "master":
-        role_note = "USER ROLE: master — may use all commands including master-only."
-    elif is_ic:
-        role_note = "USER ROLE: ic — may use all commands EXCEPT master-only commands. Do NOT suggest /removeic."
-    else:
-        role_note = (
-            "USER ROLE: viewer (not IC) — may ONLY use commands from the 'Commands (anyone)' list. "
-            "Do NOT suggest any IC-only or master-only commands. "
-            "If their question requires an IC command (e.g. /training, /sheetattendance), "
-            "tell them to ask an IC to run it instead."
-        )
-    system_content = role_note + "\n\n" + _HELP_SYSTEM_PROMPT
-
-    question = " ".join(context.args)
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": question},
-            ],
-            temperature=0,
-            max_tokens=256,
-        )
-        answer = response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error("Help AI error: %s", e)
-        await update.message.reply_text("❌ Couldn't get an answer. Try again.")
-        return
-    await update.message.reply_text(f"💬 {answer}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1391,6 +1223,66 @@ async def _send_attendance_post(bot_obj, training: dict) -> tuple[bool, str]:
     return True, ""
 
 
+async def _ic_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Run daily at IC_REMINDER_TIME SGT. When training is tomorrow, DM each IC
+    (falling back to the master if there are none) a heads-up, once per day.
+    """
+    if not _sheets_enabled:
+        return
+
+    now_sgt = datetime.now(SGT)
+    if (now_sgt.hour, now_sgt.minute) < (IC_REMINDER_HOUR, IC_REMINDER_MINUTE):
+        return
+
+    tomorrow = now_sgt.date() + timedelta(days=1)
+    date_str = tomorrow.strftime("%d/%m/%Y")
+
+    if db.get_setting("ic_reminder_sent_for") == date_str:
+        return
+
+    training_row = db.get_training_by_date(date_str)
+    if training_row:
+        venue, time_str = training_row["venue"], training_row["report_time"]
+    else:
+        try:
+            sheet_data = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, tomorrow)
+        except Exception as e:
+            logger.warning("IC reminder sheet check failed: %s", e)
+            return
+        if sheet_data is None:
+            return  # no training tomorrow
+        venue, time_str = sheet_data.get("venue"), sheet_data.get("time")
+
+    auth_rows = db.list_auth()
+    targets = [r["user_id"] for r in auth_rows if r["role"] == "ic"]
+    if not targets:
+        targets = [r["user_id"] for r in auth_rows if r["role"] == "master"]
+    if not targets:
+        return
+
+    msg = (
+        f"⚠️ *Training tomorrow!*\n"
+        f"📅 {date_str} · {venue or 'TBC'} · {time_str or 'TBC'}\n\n"
+        f"The attendance list will be auto-posted to the channel at "
+        f"{ATTENDANCE_POST_HOUR:02d}:{ATTENDANCE_POST_MINUTE:02d}.\n"
+        f"• /blast — post it now (normal or by position)\n"
+        f"• /attendancepos — preview grouped by position"
+    )
+    sent = 0
+    for uid in targets:
+        try:
+            await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+            sent += 1
+        except Exception as e:
+            # Telegram only lets bots DM users who have messaged them first.
+            logger.warning("IC reminder DM to %s failed: %s", uid, e)
+
+    if sent:
+        db.set_setting("ic_reminder_sent_for", date_str)
+        logger.info("IC training reminder sent to %d user(s) for %s.", sent, date_str)
+
+
 @ic_only
 async def cmd_blast(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     """
@@ -1525,81 +1417,6 @@ async def callback_blast_type(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ──────────────────────────────────────────────────────────────
-# SCHEDULED REMINDERS
-# ──────────────────────────────────────────────────────────────
-
-SGT = ZoneInfo("Asia/Singapore")
-
-_REMINDER_1D = (
-    "⚠️ *Training tomorrow!*\n\n"
-    "Prep checklist:\n"
-    "• Set attendance → /attendance\n"
-    "• Post positions → /attendancepos"
-)
-
-
-async def _reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    job = context.job
-    try:
-        await context.bot.send_message(
-            chat_id=job.chat_id,
-            text=job.data["message"],
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        logger.warning("Failed to send reminder (chat_id=%s): %s", job.chat_id, e)
-
-
-def _schedule_training_reminders(app, training_id: int, date_str: str, chat_id: int) -> int:
-    """
-    Schedule up to 3 reminder jobs for a training session.
-    Returns the number of jobs actually scheduled (skips any that are already past).
-    date_str format: DD/MM/YYYY
-    """
-    try:
-        training_date = datetime.strptime(date_str, "%d/%m/%Y").date()
-    except ValueError:
-        logger.warning("Could not parse training date for reminders: %s", date_str)
-        return 0
-
-    now = datetime.now(SGT)
-    scheduled = 0
-
-    reminders = [
-        # (days before training, hour SGT, minute, message)
-        (1, 9, 0, _REMINDER_1D),
-    ]
-
-    for days_before, hour, minute, msg in reminders:
-        remind_dt = datetime(
-            training_date.year, training_date.month, training_date.day,
-            hour, minute, 0,
-            tzinfo=SGT,
-        ) - timedelta(days=days_before)
-
-        if remind_dt <= now:
-            continue  # Already past, skip
-
-        job_name = f"training_{training_id}_d{days_before}"
-        # Remove any existing job with this name before scheduling
-        existing = app.job_queue.get_jobs_by_name(job_name)
-        for j in existing:
-            j.schedule_removal()
-
-        app.job_queue.run_once(
-            _reminder_job,
-            when=remind_dt,
-            chat_id=chat_id,
-            data={"message": msg, "training_id": training_id},
-            name=job_name,
-        )
-        logger.info("Reminder scheduled: %s at %s for chat %s", job_name, remind_dt, chat_id)
-        scheduled += 1
-
-    return scheduled
-
-
-# ──────────────────────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────────────────────
 
@@ -1636,18 +1453,8 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    # Reschedule reminders for any active training that survived a restart
-    training = db.get_active_training()
-    if training and training["reminder_chat_id"]:
-        n = _schedule_training_reminders(
-            app, training["id"], training["date"], training["reminder_chat_id"]
-        )
-        if n:
-            logger.info("Rescheduled %d reminder(s) for training #%d on restart.", n, training["id"])
-
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("help",        cmd_help))
-    app.add_handler(CommandHandler("ask",         cmd_ask))
     app.add_handler(CommandHandler("acceptic",    cmd_acceptic))
 
     app.add_handler(CommandHandler("training",      cmd_training))
@@ -1679,26 +1486,29 @@ def main():
         app.job_queue.run_repeating(_sheet_poll_job, interval=300, first=10)
         logger.info("Sheet polling job scheduled (every 5 min).")
 
-        # Auto-attendance: position-grouped post the day before training.
-        now_sgt     = datetime.now(SGT)
-        target_post = now_sgt.replace(
-            hour=ATTENDANCE_POST_HOUR, minute=ATTENDANCE_POST_MINUTE, second=0, microsecond=0
-        )
-        if target_post <= now_sgt:
-            target_post += timedelta(days=1)
-        seconds_until = (target_post - now_sgt).total_seconds()
+        # Daily day-before jobs: attendance post to the reminder chat, and the
+        # heads-up DM to ICs. The run_once calls catch up after restarts; each
+        # job's time gate + sent marker make them once-only.
+        def _seconds_until(hour: int, minute: int) -> float:
+            now_sgt = datetime.now(SGT)
+            target = now_sgt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target <= now_sgt:
+                target += timedelta(days=1)
+            return (target - now_sgt).total_seconds()
+
         app.job_queue.run_repeating(
-            _auto_attendance_job,
-            interval=86400,       # every 24 hours
-            first=seconds_until,
+            _auto_attendance_job, interval=86400,
+            first=_seconds_until(ATTENDANCE_POST_HOUR, ATTENDANCE_POST_MINUTE),
         )
-        # Catch up safely after a restart during the day-before window. The DB
-        # sent marker and the in-job time gate make this a no-op if the post
-        # already ran or the scheduled time hasn't arrived yet.
         app.job_queue.run_once(_auto_attendance_job, when=10)
+        app.job_queue.run_repeating(
+            _ic_reminder_job, interval=86400,
+            first=_seconds_until(IC_REMINDER_HOUR, IC_REMINDER_MINUTE),
+        )
+        app.job_queue.run_once(_ic_reminder_job, when=15)
         logger.info(
-            "Auto-attendance job scheduled (daily at %02d:%02d SGT).",
-            ATTENDANCE_POST_HOUR, ATTENDANCE_POST_MINUTE,
+            "Daily jobs scheduled: attendance post %02d:%02d SGT, IC reminder %02d:%02d SGT.",
+            ATTENDANCE_POST_HOUR, ATTENDANCE_POST_MINUTE, IC_REMINDER_HOUR, IC_REMINDER_MINUTE,
         )
 
     # Open the health endpoint when PORT is set (Render web service + keep-alive pings)

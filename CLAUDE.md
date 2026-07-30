@@ -50,11 +50,11 @@
 | `SHEET_NAME`       | `Sheet1`         | Tab name for attendance tracking     |
 | `SHEET_POSNAME`    | `sheet71`        | Tab name for the positions roster    |
 | `SHEET_CREDS`      | `service_account.json` | Path or raw JSON for GCP creds |
-| `GROQ_API_KEY`     | —                | Optional: Groq AI key                |
 | `DATABASE_URL`     | —                | Postgres URI (Supabase); when set, used instead of SQLite |
 | `DB_PATH`          | `hblogs.db`      | SQLite file path (local dev only)    |
 | `PORT`             | —                | If set, serves an HTTP health endpoint (Render/uptime pings) |
 | `ATTENDANCE_POST_TIME` | `15:00`      | Time (SGT, 24h HH:MM) of the daily day-before attendance post |
+| `IC_REMINDER_TIME` | `09:00`          | Time (SGT, 24h HH:MM) of the day-before heads-up DM to ICs |
 
 Storage backend: `database.py` uses Postgres when `DATABASE_URL` is set, SQLite otherwise.
 Deployment: see `deploy/DEPLOY.md` (Render free tier + Supabase + UptimeRobot).
@@ -95,7 +95,6 @@ Rows named `Total` are ignored in both the roster and the attendance tab.
 - `/attendance` — pick from upcoming sessions (view attendance)
 - `/attendancepos` — same as /attendance but grouped by position
 - `/acceptic` — accept a pending IC handover
-- `/ask [question]` — ask a question about commands or attendance
 - `/help` — this list
 
 ### IC-only (Training)
@@ -105,6 +104,8 @@ Rows named `Total` are ignored in both the roster and the attendance tab.
 - `/blast` — two-step picker (session → normal/position-grouped), then sends that attendance message to the reminder chat immediately; ignores the once-only marker and scheduled time
 
 **Auto-post behaviour:** daily at `ATTENDANCE_POST_TIME` SGT, the bot checks the sheet for a session dated tomorrow. If found, it auto-creates the training record (no manual `/training` needed) and posts the **normal attendance message** to the default reminder chat (`settings.reminder_chat`, set by `/reminderchat`). The `attendance_pos_sent_at` marker ensures it posts once per training. Position-grouped posts are available manually via `/blast` or `/attendancepos`.
+
+**IC heads-up:** daily at `IC_REMINDER_TIME` SGT (default 09:00), when training is tomorrow, the bot DMs every `ic`-role user (master if none) a reminder that the auto-post is coming, once per day (`settings.ic_reminder_sent_for` marker). There is no channel prep reminder — that was removed in favour of these DMs.
 - Forwarding an `Attendance DD/MM/YY` message to the bot auto-creates a training + attendance
 
 ### IC-only (Admin)
