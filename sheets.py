@@ -33,6 +33,9 @@ _TIME_ROW       = 3
 _DATA_ROW_START = 4
 _NAME_COL       = 0
 
+# Name-column values that aren't players (summary rows etc.)
+_NON_PLAYER_ROWS = {"total"}
+
 
 # ──────────────────────────────────────────────────────────────
 # CLIENT
@@ -266,7 +269,7 @@ def get_attendance(
     attendance = {}
     for row in rows[_DATA_ROW_START:]:
         name = row[_NAME_COL].strip() if len(row) > _NAME_COL else ""
-        if not name:
+        if not name or name.lower() in _NON_PLAYER_ROWS:
             continue
         attendance[name] = parse_cell(_col(row))
 
@@ -282,29 +285,69 @@ def get_attendance(
 # POSITIONS
 # ──────────────────────────────────────────────────────────────
 
+def _parse_columnar_positions(rows: list[list[str]]) -> dict[str, str]:
+    """
+    Parse the columnar roster layout (the "Positions" tab):
+
+      row 1  : position group headers, e.g.  BACKS | No. | WINGERS | No. | ...
+      row 2+ : player names under each group header ("No." columns hold
+               jersey numbers and are skipped, as are numeric cells)
+
+    Returns {name: Group} with group labels title-cased from the headers,
+    inserted in column order (so dict.values() preserves group order).
+    Returns {} if the first row doesn't look like group headers.
+    """
+    header = rows[0]
+    group_cols = [
+        (i, cell.strip().title())
+        for i, cell in enumerate(header)
+        if cell.strip() and cell.strip().lower().rstrip(".") != "no"
+    ]
+    if len(group_cols) < 2:
+        return {}
+
+    positions: dict[str, str] = {}
+    for col, label in group_cols:
+        for row in rows[1:]:
+            cell = row[col].strip() if len(row) > col else ""
+            if not cell or cell.isdigit() or cell.lower() in _NON_PLAYER_ROWS:
+                continue
+            # A name listed under two groups keeps the first (leftmost) one.
+            positions.setdefault(cell, label)
+    return positions
+
+
+def _parse_legacy_positions(rows: list[list[str]]) -> dict[str, str]:
+    """
+    Parse the legacy roster layout (attendance-style tab, e.g. "Sheet 71"):
+      rows 1-4 : header/instructions (skipped)
+      row  5+  : col A = player name, col B = position
+    """
+    positions: dict[str, str] = {}
+    for row in rows[_DATA_ROW_START:]:
+        name = row[0].strip() if len(row) > 0 else ""
+        pos  = row[1].strip() if len(row) > 1 else ""
+        if name and pos and name.lower() not in _NON_PLAYER_ROWS:
+            positions[name] = pos
+    return positions
+
+
 def get_positions(
     spreadsheet_id: str,
     sheet_name: str,
     creds_path: str,
 ) -> dict[str, str]:
     """
-    Read the positions roster from a dedicated sheet tab (e.g. "sheet71").
+    Read the positions roster from the tab named by SHEET_POSNAME.
 
-    Expects the same layout as the attendance sheet:
-      rows 1-3  : header/instructions (skipped)
-      row  4    : "Start Warmup at" label (skipped)
-      row  5+   : col A = player name, col B = position
-
-    Returns {name: position} for every row that has both a name and a position.
+    Tries the columnar layout first (one column of names per position group);
+    falls back to the legacy name/position row layout. Returns
+    {player name: position group label}.
     """
     client = _get_client(creds_path)
     sheet  = client.open_by_key(spreadsheet_id).worksheet(sheet_name)
     rows   = sheet.get_all_values()
+    if not rows:
+        return {}
 
-    positions: dict[str, str] = {}
-    for row in rows[_DATA_ROW_START:]:
-        name = row[0].strip() if len(row) > 0 else ""
-        pos  = row[1].strip() if len(row) > 1 else ""
-        if name and pos:
-            positions[name] = pos
-    return positions
+    return _parse_columnar_positions(rows) or _parse_legacy_positions(rows)

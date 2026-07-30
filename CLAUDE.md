@@ -54,6 +54,7 @@
 | `DATABASE_URL`     | —                | Postgres URI (Supabase); when set, used instead of SQLite |
 | `DB_PATH`          | `hblogs.db`      | SQLite file path (local dev only)    |
 | `PORT`             | —                | If set, serves an HTTP health endpoint (Render/uptime pings) |
+| `ATTENDANCE_POST_HOUR` | `16`         | Hour (SGT, 0-23) of the daily day-before attendance post |
 
 Storage backend: `database.py` uses Postgres when `DATABASE_URL` is set, SQLite otherwise.
 Deployment: see `deploy/DEPLOY.md` (Render free tier + Supabase + UptimeRobot).
@@ -73,15 +74,17 @@ Deployment: see `deploy/DEPLOY.md` (Render free tier + Supabase + UptimeRobot).
 
 Cell values: `1` = present, `0` = absent, `1 (late, work, 8pm)` = late, `tbc` = TBC, blank = no response.
 
-### Positions roster (`SHEET_POSNAME` / sheet71)
+### Positions roster (`SHEET_POSNAME` / "Positions" tab)
+Columnar layout — one column of player names per position group:
 | Row (0-based) | Content |
 |---|---|
-| 0–2 | Header / instructions (skipped) |
-| 3 | "Start Warmup at" label (skipped) |
-| 4+ | Col A = player name, Col B = position |
+| 0 | Group headers, e.g. `BACKS`, `No.`, `WINGERS`, `No.`, `PIVOTS`, `CENTERS`, `KEEPERS` |
+| 1+ | Player names under each group header (`No.` columns / numeric cells skipped) |
 
-Valid positions: `Goalkeeper`, `Pivot`, `Back`, `Wing`
-Display labels:  `Keeper`,     `Pivots`, `CBs`, `Wings`
+Groups and their display order come straight from the headers (title-cased) —
+new/renamed groups in the sheet need no code changes. A legacy fallback still
+parses the old row layout (col A = name, col B = position, data from row 5).
+Rows named `Total` are ignored in both the roster and the attendance tab.
 
 ---
 
@@ -98,7 +101,7 @@ Display labels:  `Keeper`,     `Pivots`, `CBs`, `Wings`
 ### IC-only (Training)
 - `/training [DD/MM/YYYY] [venue] [time]` — manually create a training session (optional)
 - `/sheetattendance [DD/MM/YYYY]` — pull attendance for a specific date
-- `/reminderchat` — redirect auto-reminders to current chat
+- `/reminderchat [@channel | -100id]` — redirect auto-reminders + day-before attendance post to the current chat, or to a channel by reference (from a PM); also works posted directly in a channel the bot administers
 - Forwarding an `Attendance DD/MM/YY` message to the bot auto-creates a training + attendance
 
 ### IC-only (Admin)

@@ -25,4 +25,4 @@ services:
       - key: SHEET_NAME
         value: Sheet1
       - key: SHEET_POSNAME
-        value: sheet71
+        value: Positions
