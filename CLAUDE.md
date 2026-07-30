@@ -104,7 +104,7 @@ Rows named `Total` are ignored in both the roster and the attendance tab.
 - `/reminderchat [@channel | -100id]` — redirect auto-reminders + day-before attendance post to the current chat, or to a channel by reference (from a PM); also works posted directly in a channel the bot administers
 - `/blast` — two-step picker (session → normal/position-grouped), then sends that attendance message to the reminder chat immediately; ignores the once-only marker and scheduled time
 
-**Auto-post behaviour:** daily at `ATTENDANCE_POST_TIME` SGT, the bot checks the sheet for a session dated tomorrow. If found, it auto-creates the training record (no manual `/training` needed) and posts position-grouped attendance to the default reminder chat (`settings.reminder_chat`, set by `/reminderchat`). The `attendance_pos_sent_at` marker ensures it posts once per training.
+**Auto-post behaviour:** daily at `ATTENDANCE_POST_TIME` SGT, the bot checks the sheet for a session dated tomorrow. If found, it auto-creates the training record (no manual `/training` needed) and posts the **normal attendance message** to the default reminder chat (`settings.reminder_chat`, set by `/reminderchat`). The `attendance_pos_sent_at` marker ensures it posts once per training. Position-grouped posts are available manually via `/blast` or `/attendancepos`.
 - Forwarding an `Attendance DD/MM/YY` message to the bot auto-creates a training + attendance
 
 ### IC-only (Admin)

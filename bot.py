@@ -1292,7 +1292,7 @@ async def _sheet_poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _auto_attendance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Run daily at ATTENDANCE_POST_TIME SGT and, when training is tomorrow, post
-    attendance grouped by position to the configured reminder chat exactly once.
+    the attendance message to the configured reminder chat exactly once.
     """
     if not _sheets_enabled:
         return
@@ -1334,13 +1334,13 @@ async def _auto_attendance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         training = dict(db.get_training_by_date(date_str))
         logger.info("Auto-created training for %s from the sheet.", date_str)
 
-    ok, detail = await _send_attendancepos_post(context.bot, training)
+    ok, detail = await _send_attendance_post(context.bot, training)
     if not ok:
         logger.info("Auto-attendance skipped: %s", detail)
         return
 
     db.mark_attendance_pos_sent(training["id"])
-    logger.info("Posted day-before position attendance for training #%s", training["id"])
+    logger.info("Posted day-before attendance for training #%s", training["id"])
 
 
 def _default_reminder_chat() -> Optional[int]:
@@ -1353,11 +1353,11 @@ def _default_reminder_chat() -> Optional[int]:
         return None
 
 
-async def _send_attendancepos_post(bot_obj, training: dict) -> tuple[bool, str]:
+async def _send_attendance_post(bot_obj, training: dict) -> tuple[bool, str]:
     """
-    Fetch sheet attendance for the training's date and post the
-    position-grouped message to its reminder chat (falling back to the
-    global default). Returns (ok, failure_reason). Used by the daily job.
+    Fetch sheet attendance for the training's date and post the normal
+    attendance message to its reminder chat (falling back to the global
+    default). Returns (ok, failure_reason). Used by the daily job.
     """
     chat_id = training.get("reminder_chat_id") or _default_reminder_chat()
     if not chat_id:
@@ -1382,14 +1382,9 @@ async def _send_attendancepos_post(bot_obj, training: dict) -> tuple[bool, str]:
     ):
         return False, f"nobody is marked as coming on {training['date']} yet"
 
+    out_msg, _ = _build_attendance_msgs(sheet_data, training)
     try:
-        positions = _sheets.get_positions(SHEET_ID, SHEET_POSITIONS_NAME, SHEET_CREDS)
-    except Exception as e:
-        logger.warning("Attendance post: positions fetch failed: %s", e)
-        positions = {}
-
-    try:
-        await bot_obj.send_message(chat_id=chat_id, text=_build_attendancepos_msg(sheet_data, positions))
+        await bot_obj.send_message(chat_id=chat_id, text=out_msg)
     except Exception as e:
         logger.error("Attendance post to chat %s failed: %s", chat_id, e)
         return False, f"couldn't post to the reminder chat: {e}"
