@@ -75,16 +75,24 @@ Deployment: see `deploy/DEPLOY.md` (Render free tier + Supabase + UptimeRobot).
 Cell values: `1` = present, `0` = absent, `1 (late, work, 8pm)` = late, `tbc` = TBC, blank = no response.
 
 ### Positions roster (`SHEET_POSNAME` / "Positions" tab)
-Columnar layout — one column of player names per position group:
-| Row (0-based) | Content |
+Columnar layout — one column of player names per position group. Title/note
+rows may sit above the header row; the parser scans the first 10 rows for the
+first row with ≥2 header-like cells (non-blank, non-numeric, not `No.`):
+| Row | Content |
 |---|---|
-| 0 | Group headers, e.g. `BACKS`, `No.`, `WINGERS`, `No.`, `PIVOTS`, `CENTERS`, `KEEPERS` |
-| 1+ | Player names under each group header (`No.` columns / numeric cells skipped) |
+| top | Optional title/note rows (merged cells — ignored) |
+| header | Group headers, e.g. `LEFT-BACK`, `No.`, `CENTERS`, `No.`, `RIGHT-BACK`, `WINGERS`, `PIVOTS`, `KEEPERS` |
+| below | Player names under each group header (`No.` columns / numeric cells skipped) |
 
 Groups and their display order come straight from the headers (title-cased) —
-new/renamed groups in the sheet need no code changes. A legacy fallback still
-parses the old row layout (col A = name, col B = position, data from row 5).
-Rows named `Total` are ignored in both the roster and the attendance tab.
+new/renamed groups in the sheet need no code changes — **except** the back
+columns (`LEFT-BACK`/`CENTERS`/`RIGHT-BACK`, see `_CB_SOURCE_LABELS` in
+bot.py), which are merged into one `CBs` section in `/attendancepos` output,
+members listed in roster column order (all L, then C, then R). Members of
+every group are listed in roster order, not attendance-sheet order. A legacy
+fallback still parses the old row layout (col A = name, col B = position,
+data from row 5). Rows named `Total` are ignored in both the roster and the
+attendance tab.
 
 ---
 

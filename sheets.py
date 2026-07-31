@@ -36,6 +36,10 @@ _NAME_COL       = 0
 # Name-column values that aren't players (summary rows etc.)
 _NON_PLAYER_ROWS = {"total"}
 
+# How far down to scan for the positions-roster group header row
+# (title/note rows may sit above it).
+_MAX_HEADER_SCAN_ROWS = 10
+
 
 # ──────────────────────────────────────────────────────────────
 # CLIENT
@@ -285,30 +289,46 @@ def get_attendance(
 # POSITIONS
 # ──────────────────────────────────────────────────────────────
 
+def _find_group_header_cols(row: list[str]) -> list[tuple[int, str]]:
+    """Columns in a row that look like position group headers (skips blanks,
+    jersey-number cells, and "No." columns)."""
+    return [
+        (i, cell.strip().title())
+        for i, cell in enumerate(row)
+        if cell.strip()
+        and not cell.strip().isdigit()
+        and cell.strip().lower().rstrip(".") != "no"
+    ]
+
+
 def _parse_columnar_positions(rows: list[list[str]]) -> dict[str, str]:
     """
     Parse the columnar roster layout (the "Positions" tab):
 
-      row 1  : position group headers, e.g.  BACKS | No. | WINGERS | No. | ...
-      row 2+ : player names under each group header ("No." columns hold
-               jersey numbers and are skipped, as are numeric cells)
+      header row : position group headers, e.g.  LEFT-BACK | No. | CENTERS | ...
+                   (found by scanning past any title/note rows above it — a
+                   row needs >=2 header-like cells to qualify; merged title
+                   and note rows only yield one)
+      below      : player names under each group header ("No." columns hold
+                   jersey numbers and are skipped, as are numeric cells)
 
     Returns {name: Group} with group labels title-cased from the headers,
     inserted in column order (so dict.values() preserves group order).
-    Returns {} if the first row doesn't look like group headers.
+    Returns {} if no row looks like group headers.
     """
-    header = rows[0]
-    group_cols = [
-        (i, cell.strip().title())
-        for i, cell in enumerate(header)
-        if cell.strip() and cell.strip().lower().rstrip(".") != "no"
-    ]
-    if len(group_cols) < 2:
+    header_idx = None
+    group_cols: list[tuple[int, str]] = []
+    for idx, row in enumerate(rows[:_MAX_HEADER_SCAN_ROWS]):
+        candidates = _find_group_header_cols(row)
+        if len(candidates) >= 2:
+            header_idx, group_cols = idx, candidates
+            break
+    if header_idx is None:
         return {}
 
     positions: dict[str, str] = {}
     for col, label in group_cols:
-        for row in rows[1:]:
+        for row in rows[header_idx + 1:]:
             cell = row[col].strip() if len(row) > col else ""
             if not cell or cell.isdigit() or cell.lower() in _NON_PLAYER_ROWS:
                 continue

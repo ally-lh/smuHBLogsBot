@@ -502,11 +502,25 @@ async def callback_attendance_pick(update: Update, _context: ContextTypes.DEFAUL
         await query.edit_message_text(f"❌ Something went wrong: {e}")
 
 
+# Roster group headers folded into the single "CBs" section of the
+# position-grouped message. Order within CBs follows roster column order
+# (left-backs, then centers, then right-backs).
+_CB_GROUP = "CBs"
+_CB_SOURCE_LABELS = {"left-back", "left back", "centers", "center", "right-back", "right back", "backs", "cbs"}
+
+
+def _display_group(label: str) -> str:
+    """Map a roster column header to the label shown in the message."""
+    return _CB_GROUP if label.lower().strip() in _CB_SOURCE_LABELS else label
+
+
 def _build_attendancepos_msg(sheet_data: dict, positions: dict) -> str:
     """
     Build a position-grouped attendance message from sheet data and the
     positions roster. Groups and their order come straight from the roster
-    (its column headers), so sheet edits need no code changes.
+    (its column headers), so sheet edits need no code changes — except the
+    back columns (left-back/centers/right-back), which are merged into one
+    "CBs" section, members listed in roster column order (L, then C, then R).
     """
     training_date = sheet_data["date"]
     venue    = sheet_data.get("venue") or "TBC"
@@ -515,11 +529,14 @@ def _build_attendancepos_msg(sheet_data: dict, positions: dict) -> str:
 
     attendance = sheet_data["attendance"]
 
-    # Case/whitespace-insensitive name → group lookup
-    pos_by_name = {k.lower().strip(): v for k, v in positions.items()}
-    group_order = list(dict.fromkeys(positions.values()))  # roster column order
+    # Case/whitespace-insensitive name → group lookup (roster headers folded
+    # into their display groups), plus each name's roster position for
+    # ordering within a group.
+    pos_by_name  = {k.lower().strip(): _display_group(v) for k, v in positions.items()}
+    roster_index = {k.lower().strip(): i for i, k in enumerate(positions.keys())}
+    group_order  = list(dict.fromkeys(_display_group(v) for v in positions.values()))
 
-    groups: dict[str, list[str]] = {label: [] for label in group_order}
+    groups: dict[str, list[tuple[int, str]]] = {label: [] for label in group_order}
     unknown: list[str] = []
     for name, parsed in attendance.items():
         if parsed.get("status") not in ("present", "late"):
@@ -532,15 +549,16 @@ def _build_attendancepos_msg(sheet_data: dict, positions: dict) -> str:
         else:
             display = resolve_name(name)
         key = name.lower().strip()
-        pos = pos_by_name.get(key, "") or pos_by_name.get(resolve_name(name), "")
+        pos = pos_by_name.get(key, "") or pos_by_name.get(resolve_name(name).lower().strip(), "")
         if pos in groups:
-            groups[pos].append(display)
+            order = roster_index.get(key, roster_index.get(resolve_name(name).lower().strip(), len(roster_index)))
+            groups[pos].append((order, display))
         else:
             unknown.append(display)
 
     lines = [f"Attendance {date_str}", ""]
     for label in group_order:
-        members = groups[label]
+        members = [display for _, display in sorted(groups[label])]
         if not members:
             continue
         lines.append(f"{label} ({len(members)})")
