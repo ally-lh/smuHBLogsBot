@@ -15,12 +15,12 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: SHEET_ID
-        sync: false
+        value: 1BRUb3Kr0eF1xC1FYN59I0C-XyFbQgWPeoWngzHgU88s
       - key: SHEET_CREDS
         sync: false
       - key: MASTER_ID
         sync: false
       - key: SHEET_NAME
-        value: Sheet1
+        value: Jan - Dec 2026
       - key: SHEET_POSNAME
         value: Positions

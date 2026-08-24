@@ -65,9 +65,9 @@ For a truly serverless AWS version, the bot would need to move from polling to a
    |-----|-------|
    | `BOT_TOKEN` | (paste from BotFather) |
    | `MASTER_ID` | your Telegram user ID |
-   | `SHEET_ID` | your Google Sheets spreadsheet ID |
-   | `SHEET_NAME` | tab name for attendance (default: `Sheet1`) |
-   | `SHEET_POSNAME` | tab name for positions roster (default: `sheet71`) |
+   | `SHEET_ID` | Google Sheets spreadsheet ID (defaults to the team attendance workbook) |
+   | `SHEET_NAME` | tab name for attendance (default: `Jan - Dec 2026`) |
+   | `SHEET_POSNAME` | tab name for positions roster (default: `Positions`) |
    | `SHEET_CREDS` | path or raw JSON of your GCP service account |
 
 4. Railway auto-detects the `Procfile` and starts the bot
@@ -154,12 +154,13 @@ Bot outputs:
 | Command | Description |
 |---------|-------------|
 | `/training [DD/MM/YYYY] [venue] [time]` | Create a training session |
-| `/attendance` | Pick a session, pull attendance from sheet, save to DB |
-| `/attendancepos` | Same picker, output grouped by position |
+| `/attendance` | Pick from the next 7 sessions, pull attendance from sheet, save to DB |
+| `/attendancepos` | Same 7-session picker, output grouped by position |
 | `/sheetattendance [DD/MM/YYYY]` | Pull attendance for a specific date |
 | `/required [items, ...]` | Set equipment needed for training |
 | `/delegate` | Generate equipment delegation plan |
 | `/reminderchat` | Send reminders and day-before position attendance here |
+| `/blast` | Pick from the next 7 sessions and send an attendance post now |
 
 ### IC-only — Inventory
 

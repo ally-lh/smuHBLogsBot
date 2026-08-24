@@ -21,7 +21,7 @@
 - always ensure all functions are working with every change
 
 **Be consistent with existing patterns:**
-- Commands that read from Google Sheets show a date-picker keyboard (3 upcoming sessions as buttons)
+- `/attendance`, `/attendancepos`, and `/blast` show a date-picker keyboard with 7 upcoming sessions
 - Callback data prefixes must be unique: `att_pick_`, `attpos_pick_`, `clear_`, `blast_pick_`, `blast_type_`, etc.
 - IC-only commands use the `@ic_only` decorator
 - Master-only commands check `role == "master"` inside the handler
@@ -46,9 +46,9 @@
 |--------------------|------------------|--------------------------------------|
 | `BOT_TOKEN`        | —                | Telegram bot token (required)        |
 | `MASTER_ID`        | `605114234`      | Telegram user ID of the master       |
-| `SHEET_ID`         | —                | Google Sheets spreadsheet ID         |
-| `SHEET_NAME`       | `Sheet1`         | Tab name for attendance tracking     |
-| `SHEET_POSNAME`    | `sheet71`        | Tab name for the positions roster    |
+| `SHEET_ID`         | team workbook ID | Google Sheets spreadsheet ID         |
+| `SHEET_NAME`       | `Jan - Dec 2026` | Tab name for attendance tracking     |
+| `SHEET_POSNAME`    | `Positions`      | Tab name for the positions roster    |
 | `SHEET_CREDS`      | `service_account.json` | Path or raw JSON for GCP creds |
 | `DATABASE_URL`     | —                | Postgres URI (Supabase); when set, used instead of SQLite |
 | `DB_PATH`          | `hblogs.db`      | SQLite file path (local dev only)    |
@@ -100,8 +100,8 @@ attendance tab.
 
 ### Anyone
 - `/start` — welcome message + status
-- `/attendance` — pick from upcoming sessions (view attendance)
-- `/attendancepos` — same as /attendance but grouped by position
+- `/attendance` — pick from the next 7 sessions (view attendance)
+- `/attendancepos` — same 7-session picker, grouped by position
 - `/acceptic` — accept a pending IC handover
 - `/help` — this list
 
@@ -109,7 +109,7 @@ attendance tab.
 - `/training [DD/MM/YYYY] [venue] [time]` — manually create a training session (optional)
 - `/sheetattendance [DD/MM/YYYY]` — pull attendance for a specific date
 - `/reminderchat [@channel | -100id]` — redirect auto-reminders + day-before attendance post to the current chat, or to a channel by reference (from a PM); also works posted directly in a channel the bot administers
-- `/blast` — two-step picker (session → normal/position-grouped), then sends that attendance message to the reminder chat immediately; ignores the once-only marker and scheduled time
+- `/blast` — two-step picker (next 7 sessions → normal/position-grouped), then sends that attendance message to the reminder chat immediately; ignores the once-only marker and scheduled time
 
 **Auto-post behaviour:** daily at `ATTENDANCE_POST_TIME` SGT, the bot checks the sheet for a session dated tomorrow. If found, it auto-creates the training record (no manual `/training` needed) and posts the **normal attendance message** to the default reminder chat (`settings.reminder_chat`, set by `/reminderchat`). The `attendance_pos_sent_at` marker ensures it posts once per training. Position-grouped posts are available manually via `/blast` or `/attendancepos`.
 

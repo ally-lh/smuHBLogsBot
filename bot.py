@@ -7,8 +7,8 @@ Commands
 ───────
 Public (anyone can DM the bot):
   /start               — welcome + command list
-  /attendance                           ← pick session from sheet; view attendance
-  /attendancepos                        ← attendance grouped by position (reads sheet71)
+  /attendance                           ← pick from next 7 sheet sessions; view attendance
+  /attendancepos                        ← same picker, grouped by position
   /acceptic            — accept a pending IC handover
 
 IC-only:
@@ -19,7 +19,7 @@ IC-only:
   /clear training
   /handover @username
   /reminderchat [@channel | -100id]     ← send reminders and day-before attendance here or to a channel
-  /blast                                ← pick session + type, send attendance to the reminder chat now
+  /blast                                ← pick from next 7 sessions + type, then send now
   /listic
 
 Master-only:
@@ -52,10 +52,11 @@ logger = logging.getLogger(__name__)
 
 MASTER_ID    = int(os.getenv("MASTER_ID", "605114234"))
 BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
-SHEET_ID             = os.getenv("SHEET_ID", "")
-SHEET_NAME           = os.getenv("SHEET_NAME", "Sheet1")
-SHEET_POSITIONS_NAME = os.getenv("SHEET_POSNAME", "sheet71")
+SHEET_ID             = os.getenv("SHEET_ID", "1BRUb3Kr0eF1xC1FYN59I0C-XyFbQgWPeoWngzHgU88s")
+SHEET_NAME           = os.getenv("SHEET_NAME", "Jan - Dec 2026")
+SHEET_POSITIONS_NAME = os.getenv("SHEET_POSNAME", "Positions")
 SHEET_CREDS          = os.getenv("SHEET_CREDS", "service_account.json")
+ATTENDANCE_PICKER_SESSION_LIMIT = 7
 
 SGT = ZoneInfo("Asia/Singapore")
 
@@ -274,8 +275,8 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     lines = ["📖 <b>Commands</b>\n"]
     lines += [
         "<b>Anyone:</b>",
-        "/attendance — pick from upcoming sessions (view attendance)",
-        "/attendancepos — same as /attendance but grouped by position",
+        "/attendance — pick from the next 7 sessions (view attendance)",
+        "/attendancepos — same 7-session picker, grouped by position",
         "/acceptic — accept a pending IC handover",
     ]
 
@@ -286,7 +287,7 @@ async def cmd_help(update: Update, _context: ContextTypes.DEFAULT_TYPE):
             "/training [DD/MM/YYYY] [venue] [time] — manually create a training session",
             "/sheetattendance [DD/MM/YYYY] — pull attendance for a specific date",
             "/reminderchat [@channel?] — send reminders + day-before attendance here (or to a channel)",
-        "/blast — pick a session + message type, send it to the reminder chat now",
+            "/blast — pick from 7 sessions + message type, then send it now",
             "",
             "<b>Admin:</b>",
             "/alias [sheet_name] as [display_name] — map a sheet name to a display name",
@@ -380,7 +381,7 @@ async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif context.args:
         text = " ".join(context.args)
     else:
-        # No-arg path: show the next 3 upcoming training sessions as buttons (sheet-based)
+        # No-arg path: show the next 7 upcoming training sessions as buttons (sheet-based)
         if not _sheets_enabled:
             await update.message.reply_text(
                 "Reply to the attendance message with `/attendance`\n\n"
@@ -391,7 +392,9 @@ async def cmd_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         try:
-            sessions = _sheets.get_upcoming_sessions(SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=3)
+            sessions = _sheets.get_upcoming_sessions(
+                SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=ATTENDANCE_PICKER_SESSION_LIMIT
+            )
         except Exception as e:
             logger.error("Sheet session fetch error: %s", e)
             await update.message.reply_text(f"❌ Couldn't read sheet: {e}")
@@ -583,7 +586,9 @@ async def cmd_attendancepos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        sessions = _sheets.get_upcoming_sessions(SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=3)
+        sessions = _sheets.get_upcoming_sessions(
+            SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=ATTENDANCE_PICKER_SESSION_LIMIT
+        )
     except Exception as e:
         logger.error("Sheet session fetch error: %s", e)
         await update.message.reply_text(f"❌ Couldn't read sheet: {e}")
@@ -1330,7 +1335,9 @@ async def cmd_blast(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        sessions = _sheets.get_upcoming_sessions(SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=3)
+        sessions = _sheets.get_upcoming_sessions(
+            SHEET_ID, SHEET_NAME, SHEET_CREDS, limit=ATTENDANCE_PICKER_SESSION_LIMIT
+        )
     except Exception as e:
         logger.error("Sheet session fetch error in /blast: %s", e)
         await update.message.reply_text(f"❌ Couldn't read sheet: {e}")
