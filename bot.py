@@ -89,10 +89,6 @@ if _sheets_enabled:
 else:
     _sheets = None  # type: ignore
 
-# Polling state — tracks the last seen attendance column so we can diff on changes
-_last_sheet_hash: Optional[str] = None   # None = not yet initialised
-_last_sheet_data: dict = {}
-
 # ──────────────────────────────────────────────────────────────
 # PARSE HELPERS
 # ──────────────────────────────────────────────────────────────
@@ -1064,88 +1060,6 @@ async def cmd_sheetattendance(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-async def _sheet_poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Background job: poll the Google Sheet every few minutes.
-    When attendance changes for today's training, send a diff to the reminder chat.
-    """
-    global _last_sheet_hash, _last_sheet_data
-
-    if not _sheets_enabled:
-        return
-
-    training = db.get_active_training()
-    if not training:
-        return
-
-    try:
-        training_date = datetime.strptime(training["date"], "%d/%m/%Y").date()
-    except ValueError:
-        return
-
-    if training_date != date.today():
-        return
-
-    chat_id = training.get("reminder_chat_id")
-    if not chat_id:
-        return
-
-    try:
-        result = _sheets.get_attendance(SHEET_ID, SHEET_NAME, SHEET_CREDS, training_date)
-    except Exception as e:
-        logger.warning("Sheet poll failed: %s", e)
-        return
-
-    if result is None:
-        return
-
-    attendance = result["attendance"]
-
-    # Build a stable hash from sorted name:raw_value pairs
-    import hashlib
-    col_str  = "|".join(f"{k}:{v}" for k, v in sorted(attendance.items()))
-    new_hash = hashlib.md5(col_str.encode()).hexdigest()
-
-    if _last_sheet_hash is None:
-        # First poll — just seed state, don't notify
-        _last_sheet_hash = new_hash
-        _last_sheet_data = dict(attendance)
-        return
-
-    if new_hash == _last_sheet_hash:
-        return  # Nothing changed
-
-    # Compute diff
-    all_names = set(_last_sheet_data) | set(attendance)
-    changes = []
-    for name in sorted(all_names):
-        old = _last_sheet_data.get(name)
-        new = attendance.get(name)
-        if old != new:
-            changes.append((name, old, new))
-
-    _last_sheet_hash = new_hash
-    _last_sheet_data = dict(attendance)
-
-    if not changes:
-        return
-
-    lines = ["📊 *Sheet update*\n"]
-    for name, old, new in changes:
-        old_str = _sheets.format_cell_status(old) if old else "—"
-        new_str = _sheets.format_cell_status(new) if new else "—"
-        lines.append(f"• *{name}*: {old_str} → {new_str}")
-
-    try:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="\n".join(lines),
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        logger.warning("Failed to send sheet update (chat_id=%s): %s", chat_id, e)
-
-
 async def _auto_attendance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Run daily at ATTENDANCE_POST_TIME SGT and, when training is tomorrow, post
@@ -1517,11 +1431,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_attpos_pick,    pattern="^attpos_pick_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_attendance))
 
-    # Poll Google Sheet every 5 minutes on training days
     if _sheets_enabled:
-        app.job_queue.run_repeating(_sheet_poll_job, interval=300, first=10)
-        logger.info("Sheet polling job scheduled (every 5 min).")
-
         # Daily day-before jobs: attendance post to the reminder chat, and the
         # heads-up DM to ICs. The run_once calls catch up after restarts; each
         # job's time gate + sent marker make them once-only.

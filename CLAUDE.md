@@ -114,9 +114,9 @@ attendance tab.
 
 **Auto-post behaviour:** daily at `ATTENDANCE_POST_TIME` SGT, the bot checks the sheet for a session dated tomorrow. If found, it auto-creates the training record (no manual `/training` needed) and posts the **normal attendance message** to the default reminder chat (`settings.reminder_chat`, set by `/reminderchat`). The `attendance_pos_sent_at` marker ensures it posts once per training. Position-grouped posts are available manually via `/blast` or `/attendancepos`.
 
-**IC heads-up:** daily at `IC_REMINDER_TIME` SGT (default 09:00), when training is tomorrow, the bot DMs every `ic`-role user (master if none) a reminder that the auto-post is coming, once per day (`settings.ic_reminder_sent_for` marker). There is no channel prep reminder — that was removed in favour of these DMs.
+**IC heads-up:** daily at `IC_REMINDER_TIME` SGT (default 09:00), when training is tomorrow, the bot DMs every `ic`-role user (master if none) a reminder that the auto-post is coming, once per day (`settings.ic_reminder_sent_for` marker). There is no channel prep reminder — that was removed in favour of these DMs. There are also no live "📊 Sheet update" diff messages on training day — the 5-minute sheet polling job was removed as spam.
 
-**Cancellation semantics (both daily jobs):** the sheet is the source of truth — if there's no column for tomorrow, or that date column is **hidden** in the sheet, nothing is sent even when a DB training record exists. Hidden date columns are treated as "no training" everywhere (session pickers, `/sheetattendance`, `/blast`, polling). A training cleared via `/clear` leaves a `status='cleared'` row that also suppresses auto-creation/posting for that date, even if the sheet still has the column.
+**Cancellation semantics (both daily jobs):** the sheet is the source of truth — if there's no column for tomorrow, or that date column is **hidden** in the sheet, nothing is sent even when a DB training record exists. Hidden date columns are treated as "no training" everywhere (session pickers, `/sheetattendance`, `/blast`). A training cleared via `/clear` leaves a `status='cleared'` row that also suppresses auto-creation/posting for that date, even if the sheet still has the column.
 - Forwarding an `Attendance DD/MM/YY` message to the bot auto-creates a training + attendance
 
 ### IC-only (Admin)

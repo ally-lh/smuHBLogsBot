@@ -65,9 +65,9 @@ per month cover a full month of 24/7 uptime for one service.
 
 - `/start` in Telegram → replies with your role badge.
 - `/listic` → shows the IC/master list migrated from SQLite.
-- Render logs (Dashboard → Logs) show sheet polling every 5 min on training
-  days and the auto-attendance job scheduled at 15:00 SGT
-  (configurable via `ATTENDANCE_POST_TIME`, 24h HH:MM).
+- Render logs (Dashboard → Logs) show the daily jobs scheduled: the
+  auto-attendance post at 15:00 SGT (`ATTENDANCE_POST_TIME`) and the IC
+  heads-up DM at 09:00 SGT (`IC_REMINDER_TIME`), both 24h HH:MM.
 
 ## Notes
 
