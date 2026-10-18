@@ -73,6 +73,7 @@ Deployment: see `deploy/DEPLOY.md` (Render free tier + Supabase + UptimeRobot).
 | 4+ | Player name (col A), attendance per date column |
 
 Cell values: `1` = present, `0` = absent, `1 (late, work, 8pm)` = late, `tbc` = TBC, blank = no response.
+Hidden (or collapsed) date columns = no training that day; `sheets.py` skips them.
 
 ### Positions roster (`SHEET_POSNAME` / "Positions" tab)
 Columnar layout — one column of player names per position group. Title/note
@@ -115,7 +116,7 @@ attendance tab.
 
 **IC heads-up:** daily at `IC_REMINDER_TIME` SGT (default 09:00), when training is tomorrow, the bot DMs every `ic`-role user (master if none) a reminder that the auto-post is coming, once per day (`settings.ic_reminder_sent_for` marker). There is no channel prep reminder — that was removed in favour of these DMs.
 
-**Cancellation semantics (both daily jobs):** the sheet is the source of truth — if there's no column for tomorrow, nothing is sent even when a DB training record exists. A training cleared via `/clear` leaves a `status='cleared'` row that also suppresses auto-creation/posting for that date, even if the sheet still has the column.
+**Cancellation semantics (both daily jobs):** the sheet is the source of truth — if there's no column for tomorrow, or that date column is **hidden** in the sheet, nothing is sent even when a DB training record exists. Hidden date columns are treated as "no training" everywhere (session pickers, `/sheetattendance`, `/blast`, polling). A training cleared via `/clear` leaves a `status='cleared'` row that also suppresses auto-creation/posting for that date, even if the sheet still has the column.
 - Forwarding an `Attendance DD/MM/YY` message to the bot auto-creates a training + attendance
 
 ### IC-only (Admin)

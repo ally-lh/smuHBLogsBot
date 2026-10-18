@@ -59,6 +59,33 @@ def _get_client(creds_path: str) -> gspread.Client:
     return gspread.authorize(creds)
 
 
+# Only pull column visibility — no cell data — when checking for hidden columns.
+_COLUMN_METADATA_FIELDS = "sheets(properties(sheetId),data(startColumn,columnMetadata(hiddenByUser)))"
+
+
+def _hidden_column_indices(metadata: dict, sheet_id: int) -> frozenset[int]:
+    """0-based indices of columns hidden (or collapsed) in the given tab."""
+    for sheet in metadata.get("sheets", []):
+        if sheet.get("properties", {}).get("sheetId") != sheet_id:
+            continue
+        return frozenset(
+            grid.get("startColumn", 0) + offset
+            for grid in sheet.get("data", [])
+            for offset, col in enumerate(grid.get("columnMetadata", []))
+            if col.get("hiddenByUser")
+        )
+    return frozenset()
+
+
+def _get_hidden_columns(spreadsheet: gspread.Spreadsheet, sheet: gspread.Worksheet) -> frozenset[int]:
+    """
+    Hidden date columns mean "no training that day", so callers skip them.
+    Raises on API errors, same as the cell reads.
+    """
+    metadata = spreadsheet.fetch_sheet_metadata(params={"fields": _COLUMN_METADATA_FIELDS})
+    return _hidden_column_indices(metadata, sheet.id)
+
+
 # ──────────────────────────────────────────────────────────────
 # CELL PARSING
 # ──────────────────────────────────────────────────────────────
@@ -190,13 +217,15 @@ def get_upcoming_sessions(
     Return the next `limit` training sessions from today onwards.
     Each entry: {"date": date, "venue": str, "time": str}
     """
-    client = _get_client(creds_path)
-    sheet  = client.open_by_key(spreadsheet_id).worksheet(sheet_name)
-    rows   = sheet.get_all_values()
+    client      = _get_client(creds_path)
+    spreadsheet = client.open_by_key(spreadsheet_id)
+    sheet       = spreadsheet.worksheet(sheet_name)
+    rows        = sheet.get_all_values()
 
     if len(rows) <= _DATE_ROW:
         return []
 
+    hidden    = _get_hidden_columns(spreadsheet, sheet)
     today     = date.today()
     date_row  = rows[_DATE_ROW]
     venue_row = rows[_VENUE_ROW] if len(rows) > _VENUE_ROW else []
@@ -204,6 +233,8 @@ def get_upcoming_sessions(
 
     sessions = []
     for i, cell in enumerate(date_row):
+        if i in hidden:
+            continue
         m = re.match(r'^\s*(\d{1,2})\s+([A-Za-z]{3})', cell.strip())
         if not m:
             continue
@@ -247,21 +278,22 @@ def get_attendance(
         "time":       str,
         "attendance": {name: parsed_cell_dict, ...},
       }
-    or None if the date column isn't found in the sheet.
+    or None if the date column isn't found in the sheet or is hidden.
     Raises on connection/auth errors.
     """
     if target_date is None:
         target_date = date.today()
 
-    client = _get_client(creds_path)
-    sheet  = client.open_by_key(spreadsheet_id).worksheet(sheet_name)
-    rows   = sheet.get_all_values()
+    client      = _get_client(creds_path)
+    spreadsheet = client.open_by_key(spreadsheet_id)
+    sheet       = spreadsheet.worksheet(sheet_name)
+    rows        = sheet.get_all_values()
 
     if len(rows) <= _DATE_ROW:
         return None
 
     col_idx = _find_date_column(rows[_DATE_ROW], target_date)
-    if col_idx is None:
+    if col_idx is None or col_idx in _get_hidden_columns(spreadsheet, sheet):
         return None
 
     def _col(row):
