@@ -77,6 +77,7 @@ def _parse_hhmm(env_key: str, default: str) -> tuple[int, int]:
 # the attendance post to the reminder chat, and the heads-up DM to ICs.
 ATTENDANCE_POST_HOUR, ATTENDANCE_POST_MINUTE = _parse_hhmm("ATTENDANCE_POST_TIME", "15:00")
 IC_REMINDER_HOUR, IC_REMINDER_MINUTE         = _parse_hhmm("IC_REMINDER_TIME", "09:00")
+AUTO_POST_SKIP_KEY = "auto_post_skip_for"  # settings key: date an IC said "No" to the auto-post
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set.")
@@ -1083,6 +1084,10 @@ async def _auto_attendance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if training and training.get("attendance_pos_sent_at"):
         return  # already posted for tomorrow
 
+    if db.get_setting(AUTO_POST_SKIP_KEY) == date_str:
+        logger.info("Auto-attendance for %s skipped: an IC declined it.", date_str)
+        return
+
     if not training:
         if db.has_cleared_training(date_str):
             return  # training was cancelled via /clear — stay silent
@@ -1215,12 +1220,20 @@ async def _ic_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         f"The attendance list will be auto-posted to the channel at "
         f"{ATTENDANCE_POST_HOUR:02d}:{ATTENDANCE_POST_MINUTE:02d}.\n"
         f"• /blast — post it now (normal or by position)\n"
-        f"• /attendancepos — preview grouped by position"
+        f"• /attendancepos — preview grouped by position\n\n"
+        f"*Should I send it?* (no answer = it goes out as usual)"
     )
+    date_key = tomorrow.strftime("%Y%m%d")
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yes", callback_data=f"autopost_yes_{date_key}"),
+        InlineKeyboardButton("❌ No",  callback_data=f"autopost_no_{date_key}"),
+    ]])
     sent = 0
     for uid in targets:
         try:
-            await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+            await context.bot.send_message(
+                chat_id=uid, text=msg, parse_mode="Markdown", reply_markup=keyboard,
+            )
             sent += 1
         except Exception as e:
             # Telegram only lets bots DM users who have messaged them first.
@@ -1229,6 +1242,58 @@ async def _ic_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if sent:
         db.set_setting("ic_reminder_sent_for", date_str)
         logger.info("IC training reminder sent to %d user(s) for %s.", sent, date_str)
+
+
+async def callback_autopost(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle the Yes/No buttons on the IC heads-up DM. "No" stores a skip marker
+    for that date so _auto_attendance_job won't post; "Yes" clears it.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    if not db.is_ic_or_master(query.from_user.id):
+        await query.edit_message_text("🔒 IC or master access required.")
+        return
+
+    match = re.fullmatch(r"autopost_(yes|no)_(\d{8})", query.data or "")
+    if not match:
+        logger.error("callback_autopost: unexpected data %r", query.data)
+        await query.edit_message_text("❌ Invalid choice — please try again.")
+        return
+    choice, date_key = match.groups()
+    try:
+        date_str = datetime.strptime(date_key, "%Y%m%d").strftime("%d/%m/%Y")
+    except ValueError:
+        logger.error("callback_autopost: bad date %r", date_key)
+        await query.edit_message_text("❌ Invalid date — please try again.")
+        return
+
+    training_row = db.get_training_by_date(date_str)
+    if training_row and dict(training_row).get("attendance_pos_sent_at"):
+        await query.edit_message_text(
+            f"ℹ️ The attendance for {date_str} has already been posted.",
+        )
+        return
+
+    post_time = f"{ATTENDANCE_POST_HOUR:02d}:{ATTENDANCE_POST_MINUTE:02d}"
+    user = query.from_user
+    who = f"@{user.username}" if user.username else user.first_name
+    if choice == "no":
+        db.set_setting(AUTO_POST_SKIP_KEY, date_str)
+        logger.info("Auto-post for %s declined by %s (%s).", date_str, who, user.id)
+        await query.edit_message_text(
+            f"❌ Got it — the {post_time} attendance post for {date_str} won't be sent.\n"
+            f"Use /blast if you want to send it manually later."
+        )
+        return
+
+    if db.get_setting(AUTO_POST_SKIP_KEY) == date_str:
+        db.set_setting(AUTO_POST_SKIP_KEY, "")
+    logger.info("Auto-post for %s confirmed by %s (%s).", date_str, who, user.id)
+    await query.edit_message_text(
+        f"✅ Confirmed — the attendance for {date_str} will be posted at {post_time}."
+    )
 
 
 @ic_only
@@ -1423,6 +1488,7 @@ def main():
     app.add_handler(CommandHandler("blast",             cmd_blast))
     app.add_handler(CallbackQueryHandler(callback_blast_pick, pattern="^blast_pick_"))
     app.add_handler(CallbackQueryHandler(callback_blast_type, pattern="^blast_type_"))
+    app.add_handler(CallbackQueryHandler(callback_autopost,   pattern="^autopost_"))
     app.add_handler(CommandHandler("listic",            cmd_listic))
     app.add_handler(CommandHandler("handover",          cmd_handover))
     app.add_handler(CommandHandler("removeic",          cmd_removeic))
